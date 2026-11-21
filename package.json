@@ -5,7 +5,14 @@
   "type": "module",
   "scripts": {
     "build": "node scripts/build-frontend.mjs",
+    "prestart": "node scripts/build-frontend.mjs",
     "start": "node server.mjs"
+  },
+  "dependencies": {
+    "@vercel/blob": "^2.1.0"
+  },
+  "devDependencies": {
+    "esbuild": "^0.27.0"
   },
   "engines": {
     "node": ">=18"

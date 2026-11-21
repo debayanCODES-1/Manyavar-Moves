@@ -1,3 +1,5 @@
+import { upload } from "@vercel/blob/client";
+
 const state = {
   summary: null, moves: [], stores: [], insights: [], currentView: "overview",
   selectedProduct: null, selectedStore: null, products: [],
@@ -84,9 +86,10 @@ async function updateAuthState() {
     demoRole.hidden = !authState.demoMode;
     $("#area-manager-label").hidden = !authState.demoMode || demoRole.value !== "area_manager";
     $("#area-manager-account").hidden = !authState.demoMode || demoRole.value !== "area_manager";
-    $("#token-label").hidden = !authState.demoMode && !authState.required;
-    $("#auth-token").hidden = !authState.demoMode && !authState.required;
-    $("#auth-token").required = !authState.demoMode && authState.required;
+    const tokenRequired = Boolean(authState.tokenRequired || (!authState.demoMode && authState.required));
+    $("#token-label").hidden = !tokenRequired;
+    $("#auth-token").hidden = !tokenRequired;
+    $("#auth-token").required = tokenRequired;
     applyPermissions();
   } catch {
     authState.required = false;
@@ -715,13 +718,32 @@ async function uploadFile(file) {
     toast("Choose an Excel workbook (.xlsx) or a ZIP of CSV tables.", true);
     return;
   }
+  if (file.size > 200 * 1024 * 1024) {
+    toast("The upload exceeds the 200 MB limit.", true);
+    return;
+  }
   $("#upload-progress").hidden = false;
   $("#upload-message").textContent = `Reading ${file.name} and preparing recommendations…`;
   $$(".top-upload, #welcome-upload, #choose-file").forEach((button) => { button.disabled = true; });
-  const form = new FormData();
-  form.append("file", file);
   try {
-    const result = await api("/api/upload", { method: "POST", body: form });
+    let result;
+    if (window.__MANYAVAR_CONFIG__?.blobUploads) {
+      $("#upload-message").textContent = `Securely uploading ${file.name} to private storage…`;
+      const stored = await upload(`datasets/${Date.now()}-${file.name}`, file, {
+        access: "private",
+        handleUploadUrl: "/api/blob-upload",
+      });
+      $("#upload-message").textContent = `Validating ${file.name} and preparing recommendations…`;
+      result = await api("/api/upload-blob", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ pathname: stored.pathname, filename: file.name }),
+      });
+    } else {
+      const form = new FormData();
+      form.append("file", file);
+      result = await api("/api/upload", { method: "POST", body: form });
+    }
     state.summary = result;
     toast(`Analysis complete · ${number(result.recommendations)} moves are ready to review.`);
     await loadDashboard();
@@ -972,7 +994,7 @@ async function initialize() {
     $("#auth-dialog").showModal();
     return;
   }
-  if (authState.demoMode && authState.authenticated && authState.user
+  if (authState.authenticated && authState.user
       && sessionStorage.getItem(demoFaceVerificationKey()) !== "demo-approved"
       && sessionStorage.getItem(demoFaceVerificationKey()) !== "camera-skipped") {
     $("#app-loader").classList.add("is-hidden");

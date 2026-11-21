@@ -3,10 +3,12 @@ import json
 import sqlite3
 import tempfile
 import unittest
+from datetime import date, datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
+from starlette.requests import Request
 from openpyxl import Workbook
 
 from backend.app.demo_data import build_demo_tables
@@ -51,6 +53,38 @@ def api_fixture():
 
 
 class APIUploadTests(unittest.TestCase):
+    def test_signed_session_accepts_valid_token_and_rejects_tampering(self):
+        with patch.object(api, "SESSION_SECRET", "test-session-secret"):
+            response = api._session_response("analyst", "Test Analyst")
+            token = json.loads(response.body)["sessionToken"]
+
+            def request_with_token(value):
+                return Request({
+                    "type": "http",
+                    "headers": [(b"authorization", f"Bearer {value}".encode())],
+                })
+
+            self.assertEqual(api._session_from_request(request_with_token(token))["role"], "analyst")
+            tampered = f"{token[:-1]}{'A' if token[-1] != 'A' else 'B'}"
+            self.assertIsNone(api._session_from_request(request_with_token(tampered)))
+
+    def test_state_payload_round_trips_dates_and_restores_required_defaults(self):
+        generated_at = datetime(2026, 10, 31, tzinfo=timezone.utc)
+        with patch.object(api, "state", {
+            "generated_at": generated_at,
+            "tables": {"calendar": [{"date": date(2026, 10, 31)}]},
+        }):
+            payload = api._database_payload()
+            self.assertEqual(payload["generated_at"], generated_at.isoformat())
+            self.assertEqual(payload["tables"]["calendar"][0]["date"], "2026-10-31")
+
+            api._restore_database_payload(payload)
+            self.assertEqual(api.state["generated_at"], generated_at.isoformat())
+            self.assertEqual(api.state["tables"]["calendar"][0]["date"], "2026-10-31")
+            self.assertEqual(api.state["approvals"], {})
+            self.assertEqual(api.state["workflow_audit"], [])
+            self.assertIsNone(api.state["source_blob_path"])
+
     def test_api_shared_secret_protects_backend_routes_but_not_health(self):
         previous = dict(api.state)
         try:

@@ -64,138 +64,68 @@ capacities, and store-to-outlet assignments are not Manyavar operational data.
 Route links open Google Maps for navigation; transfer lead times continue to
 come from the configured lead-time table, not a live routing service.
 
-## Deploy the frontend on Vercel
+## Deploy the full stack on Vercel
 
-The Vercel project serves the static frontend. The Node gateway and FastAPI
-backend run together on Render, where the persistent disk stores uploaded
-workbooks, SQLite approvals, and workflow history. The browser calls the
-Render gateway over HTTPS using an exact-origin CORS allowlist and an
-eight-hour signed bearer session; the Vercel build does not expose the backend
-shared secret. The short-lived bearer is kept in tab-scoped session storage so
-the default Vercel and Render hostnames do not depend on third-party cookies.
-This split is intentional: Vercel functions
-are not used as a proxy for the 200 MB workbook upload path or as persistent
-storage.
+The project deploys as one Vercel application: the static frontend is served
+from `public/`, the root `app.py` exposes the FastAPI backend, and
+`api/blob-upload.js` creates authenticated upload tokens for private Vercel
+Blob uploads. Neon Postgres persists the current analyzed dataset,
+recommendations, and approval history across function instances. The daily
+Vercel Cron refreshes recommendations from that saved dataset; it does not
+fetch new ERP/WMS data.
 
-### 1. Deploy the persistent backend
+1. Link the Git repository to the Vercel project with the repository root as
+   the project root and retain the `npm run build` command from
+   [vercel.json](./vercel.json).
+2. Provision Neon Postgres and a private Vercel Blob store, and connect both
+   integrations to the project for Production, Preview, and Development.
+   Confirm the integrations provide `DATABASE_URL` and `BLOB_READ_WRITE_TOKEN`.
+3. Add these variables in Vercel → Project Settings → Environment Variables:
 
-Create a Render Blueprint from this repository and use [render.yaml](./render.yaml).
-The service uses the existing Docker image and mounts a persistent disk at
-`/app/data`. A paid Render plan is required for persistent disks. Configure:
+   * `APP_SESSION_SECRET`: a long random secret used to sign eight-hour sessions.
+   * `APPROVAL_TOKEN`: a separate long random team access token. Demo role
+     sign-in requires it when configured; keep it private and share it only
+     with intended testers.
+   * `CRON_SECRET`: a separate long random value protecting the scheduled run.
+   * `DEMO_MODE`: `true` to enable the role-based demo login.
+   * `GEMINI_API_KEY`: optional, server-side only.
 
-* `APPROVAL_TOKEN`: a long random token for production login.
-* `FRONTEND_ORIGINS`: comma-separated, exact browser origins such as
-  `https://manyavar-moves.vercel.app` and your custom production domain. Do not
-  add a trailing slash. Add preview domains explicitly if you need them.
-* `GEMINI_API_KEY`: optional, server-side only.
+   Set the three secrets for each environment you deploy. Do not add them to
+   source control or expose them through frontend build variables.
+4. Leave `PUBLIC_API_BASE_URL` unset. The browser calls same-origin `/api/*`
+   routes; the build generates only ignored runtime configuration.
+5. Deploy from the linked project with `vercel --prod`, or push the branch
+   connected to Vercel. After deployment, check `/health`, `/api/health`, and
+   the sign-in flow. The cron schedule is `02:00 UTC` daily.
 
-Render generates `APP_SESSION_SECRET` and `API_SHARED_SECRET`. Keep these
-private and do not copy them into Vercel. The gateway uses the shared secret
-when it calls FastAPI; direct API calls without it are rejected. Set
-`DEMO_MODE=false` for the configured token login.
-
-The expected Render service origin is
-`https://manyavar-stock-mover.onrender.com`; use the actual origin shown by
-Render if it assigns a different hostname. Check
-`https://<render-host>/health` after deploy.
-
-### 2. Deploy the frontend
-
-Import the same Git repository into Vercel with the repository root as the
-project root. [vercel.json](./vercel.json) selects the static `public` output
-and `npm run build`. In Vercel Project Settings → Environment Variables, set
-`PUBLIC_API_BASE_URL` to the Render gateway origin, for example
-`https://manyavar-stock-mover.onrender.com`, for every environment you will
-deploy. Redeploy after changing it. The build intentionally fails on Vercel if
-this value is missing or is not HTTPS.
-
-After Vercel assigns the project URL, add its exact origin to Render's
-`FRONTEND_ORIGINS` and redeploy the backend. The generated
-`public/runtime-config.js` is ignored by Git; it contains only the public API
-origin and is generated at build time.
+Workbook files are uploaded to private Blob storage (up to 200 MB); FastAPI
+downloads and validates each file before replacing the persisted analysis.
+The app uses the supplied or generated dataset and does not connect to a live
+Manyavar ERP, billing, or warehouse system.
 
 The app's header references the official Manyavar-hosted Manyavar & Mohey
 wordmark image. It is an external brand asset; use the brand's approved asset
 or a locally supplied licensed copy if your production deployment requires
 third-party assets to be self-hosted.
 
-I cannot connect or publish a Vercel project from this repository without
-access to your Vercel account. The checked-in configuration prepares the
-project for import; the Render Blueprint and Vercel environment values above
-are the remaining account-level setup.
+For self-hosted deployments, the FastAPI process stores uploaded sources and
+approval decisions in `DATA_DIR` (default `./data`) and reloads the latest
+dataset on restart. Its local scheduler recomputes from that snapshot; it does
+not fetch new ERP/WMS data.
 
-The FastAPI process stores the last uploaded source, approval decisions, and
-analysis state in `DATA_DIR` (default `./data`). It reloads the latest source
-on restart. The daily scheduler recomputes from that most recently uploaded
-snapshot; it does not fetch new ERP/WMS data. To make the inputs themselves
-fully automatic, connect a scheduled export or inventory-system adapter to
-the upload API. No source-system credentials or integration details were
-provided in the brief, so none are assumed here.
-
-### Docker
+## Self-hosted Docker
 
 ```bash
 cp .env.example .env
-# Set DEMO_MODE=false, APPROVAL_TOKEN, and GEMINI_API_KEY for a shared deployment.
+# Set APP_SESSION_SECRET, APPROVAL_TOKEN, and DEMO_MODE before sharing the app.
 docker compose up --build
 ```
 
 Open [http://localhost:3000](http://localhost:3000). The named Docker volume
-persists uploaded data and decisions.
-
-## Production deployment
-
-The application has one externally exposed Node.js gateway and one private
-FastAPI process. The gateway signs role sessions, applies permissions, and
-proxies `/api/*` requests to FastAPI. Browser code uses relative `/api` calls
-by default, so no API key is exposed in frontend assets.
-
-1. Copy the environment template:
-
-   ```bash
-   cp .env.example .env
-   ```
-
-2. Set deployment secrets and public URLs in `.env`:
-
-   ```dotenv
-   DEMO_MODE=false
-   APPROVAL_TOKEN=<long-random-token>
-   APP_SESSION_SECRET=<long-random-secret>
-   GEMINI_API_KEY=<optional-server-side-key>
-   PUBLIC_API_BASE_URL=/
-   FASTAPI_URL=http://127.0.0.1:8000
-   DATA_DIR=/app/data
-   ```
-
-   Never commit `.env`, `.env.*`, uploaded datasets, SQLite files, private keys,
-   or API tokens. `.env`, `.env.*`, `data/`, `*.sqlite`, `*.sqlite3`, private
-   keys, secrets, virtual environments, caches and logs are ignored by Git.
-   Generate random secrets with:
-
-   ```bash
-   openssl rand -hex 32
-   ```
-
-3. Deploy with Docker:
-
-   ```bash
-   docker compose up --build -d
-   docker compose ps
-   docker compose logs --tail=100 stock-mover
-   ```
-
-4. Terminate HTTPS at a trusted reverse proxy and proxy only port `3000`.
-   Keep FastAPI port `8000` private. Set `PUBLIC_API_BASE_URL` to the external
-   origin or deployment subpath (for example `/manyavar`) when the app is not
-   mounted at `/`.
-
-5. Before accepting real shipments, connect inventory/WMS exports to
-   `POST /api/upload` and a shipment/receipt integration to the validated
-   logistics workflow. The camera login is intentionally a demo convenience:
-   it opens a local camera preview and automatically displays “Face approved.”
-   It does not detect or compare faces, save images, establish identity, or
-   provide production authentication.
+persists uploaded data and decisions. Terminate HTTPS at a trusted reverse
+proxy and expose only the Node gateway on port `3000`; keep FastAPI port
+`8000` private. The camera login is a non-biometric demo convenience: it does
+not detect or compare faces, save images, or establish identity.
 
 ## Product capabilities
 
@@ -305,19 +235,25 @@ tier/category display minimum rather than inventing a required size assortment.
 | Variable | Purpose | Default |
 |---|---|---|
 | `GEMINI_API_KEY` | Gemini API key for the optional Q&A feature | unset |
-| `DEMO_MODE` | Enable passwordless, role-based demo sessions | `true` |
-| `APPROVAL_TOKEN` | Optional gate for demo sign-in, or required team token when demo mode is off | unset |
+| `DEMO_MODE` | Enable role-based demo sessions | `true` |
+| `APPROVAL_TOKEN` | Team access token for demo sign-in or token-only login | unset |
 | `APP_SESSION_SECRET` | HMAC secret for the HttpOnly, 8-hour session cookie | random per process in local mode |
+| `CRON_SECRET` | Bearer secret for the scheduled Vercel refresh | required on Vercel |
+| `DATABASE_URL` | Neon Postgres connection string for persistent state | required on Vercel |
+| `BLOB_READ_WRITE_TOKEN` | Private Vercel Blob upload/download credential | required for Vercel uploads |
+| `PUBLIC_API_BASE_URL` | Optional API origin; leave unset for same-origin Vercel | unset |
 | `AUTO_RUN_INTERVAL_HOURS` | Recompute interval for the latest uploaded snapshot | `24` |
 | `AGE_THRESHOLD_DAYS` | Ageing-stock pullback heuristic threshold | `120` |
 | `DATA_DIR` | Persistent uploads and approval decisions | `./data` |
 | `FASTAPI_URL` | Node gateway's FastAPI upstream | `http://127.0.0.1:8000` |
 | `PORT` | Node gateway listen port | `3000` |
 
-Demo mode is intentionally open and is not production authentication. For any
-shared deployment, set `DEMO_MODE=false`, a long random `APPROVAL_TOKEN`, a
-separate random `APP_SESSION_SECRET`, and terminate HTTPS at a trusted reverse proxy.
-The FastAPI port should remain private; the included Compose setup exposes only
+Local demo mode is intentionally open and is not production authentication.
+For a shared Vercel demo, keep `DEMO_MODE=true` and set a private
+`APPROVAL_TOKEN`, `APP_SESSION_SECRET`, and `CRON_SECRET`. For a self-hosted
+team deployment, set `DEMO_MODE=false`, configure an access token and a
+separate session secret, and terminate HTTPS at a trusted reverse proxy. The
+FastAPI port should remain private; the included Compose setup exposes only
 the Node gateway.
 
 ## API

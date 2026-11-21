@@ -1,5 +1,16 @@
 {
   "version": 2,
   "buildCommand": "npm run build",
-  "outputDirectory": "public"
+  "regions": ["sin1"],
+  "functions": {
+    "api/blob-upload.js": {
+      "maxDuration": 60
+    }
+  },
+  "crons": [
+    {
+      "path": "/api/cron/run",
+      "schedule": "0 2 * * *"
+    }
+  ]
 }

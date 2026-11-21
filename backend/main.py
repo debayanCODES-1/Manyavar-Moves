@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import csv
 import hashlib
 import hmac
 import io
 import json
 import os
+import re
 import sqlite3
 import sys
 import tempfile
@@ -23,7 +25,7 @@ from typing import Any
 from urllib.parse import urlencode
 
 from fastapi import FastAPI, File, Header, HTTPException, Query, Request, UploadFile
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -39,18 +41,176 @@ from backend.app.demo_data import build_demo_tables  # noqa: E402
 from backend.app.forecast import forecast_velocity  # noqa: E402
 from backend.app.optimizer import optimize_proposals  # noqa: E402
 
-DATA_DIR = Path(os.environ.get("DATA_DIR", ROOT / "data"))
+IS_VERCEL = os.environ.get("VERCEL") == "1"
+DATABASE_URL = os.environ.get("DATABASE_URL", "")
+SESSION_SECRET = os.environ.get("APP_SESSION_SECRET", "")
+APPROVAL_TOKEN = os.environ.get("APPROVAL_TOKEN", "")
+DEMO_MODE = os.environ.get("DEMO_MODE", "true").lower() != "false"
+CRON_SECRET = os.environ.get("CRON_SECRET", "")
+DATA_DIR = Path(os.environ.get(
+    "DATA_DIR",
+    "/tmp/manyavar-stock-mover" if IS_VERCEL else ROOT / "data",
+))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 API_SHARED_SECRET = os.environ.get("API_SHARED_SECRET", "")
 
 app = FastAPI(title="Manyavar Stock Mover API", version="1.0.0")
+_state_request_lock = asyncio.Lock()
+_database_ready = False
+_ROLE_PERMISSIONS = {
+    "admin": ("read", "upload", "run", "approve", "ask"),
+    "stock_manager": ("read", "upload", "run", "approve", "ask"),
+    "validator": ("read", "approve", "ask"),
+    "area_manager": ("read", "approve", "ask"),
+    "analyst": ("read", "ask"),
+    "viewer": ("read",),
+}
 state: dict[str, Any] = {
     "tables": None, "moves": [], "model": {}, "optimizer": {},
     "source_name": None, "generated_at": None, "approvals": {},
+    "source_blob_path": None, "workflow_audit": [],
     "is_demo_data": False,
     "products": {}, "sales_weekly": {}, "stock_weekly": {}, "bill_summaries": [],
     "sku_store_sales_weekly": {}, "sku_store_stock_weekly": {},
 }
+
+
+def _encode_urlsafe(value: bytes) -> str:
+    return base64.urlsafe_b64encode(value).decode("ascii").rstrip("=")
+
+
+def _decode_urlsafe(value: str) -> bytes:
+    return base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
+
+
+def _session_from_request(request: Request) -> dict[str, Any] | None:
+    authorization = request.headers.get("authorization", "")
+    bearer = authorization[7:] if authorization.startswith("Bearer ") else ""
+    token = request.cookies.get("stock_mover_session") or bearer
+    try:
+        payload, signature = token.rsplit(".", 1)
+        if not SESSION_SECRET:
+            return None
+        expected = _encode_urlsafe(hmac.new(
+            SESSION_SECRET.encode(), payload.encode(), hashlib.sha256,
+        ).digest())
+        if not hmac.compare_digest(signature, expected):
+            return None
+        session = json.loads(_decode_urlsafe(payload))
+        if session.get("expires", 0) <= int(datetime.now(timezone.utc).timestamp() * 1000):
+            return None
+        role = session.get("role")
+        if role not in _ROLE_PERMISSIONS:
+            return None
+        return {
+            "name": str(session.get("name") or "Merchandising team"),
+            "role": role,
+            "area_manager_id": session.get("area_manager_id") or None,
+            "permissions": list(_ROLE_PERMISSIONS[role]),
+        }
+    except (ValueError, TypeError, json.JSONDecodeError):
+        return None
+
+
+def _session_response(role: str, name: str, area_manager_id: str | None = None) -> JSONResponse:
+    payload = _encode_urlsafe(json.dumps({
+        "name": name,
+        "role": role,
+        "area_manager_id": area_manager_id,
+        "expires": int(datetime.now(timezone.utc).timestamp() * 1000) + 8 * 60 * 60 * 1000,
+    }, separators=(",", ":")).encode())
+    signature = _encode_urlsafe(hmac.new(
+        SESSION_SECRET.encode(), payload.encode(), hashlib.sha256,
+    ).digest())
+    token = f"{payload}.{signature}"
+    return JSONResponse(
+        content={
+            "ok": True,
+            "user": {
+                "name": name,
+                "role": role,
+                "area_manager_id": area_manager_id,
+                "permissions": list(_ROLE_PERMISSIONS[role]),
+            },
+            "sessionToken": token,
+        },
+        headers={
+            "set-cookie": (
+                f"stock_mover_session={token}; HttpOnly; Secure; SameSite=Lax; "
+                "Path=/; Max-Age=28800"
+            ),
+        },
+    )
+
+
+def _permission_for(method: str, path: str) -> str | None:
+    if path in {"/api/upload", "/api/upload-blob"} and method == "POST":
+        return "upload"
+    if path == "/api/run" and method == "POST":
+        return "run"
+    if path == "/api/ask" and method == "POST":
+        return "ask"
+    if path.startswith("/api/recommendations/") and method == "PATCH":
+        return "approve"
+    if path.startswith("/api/logistics/") and method == "POST":
+        return "approve"
+    return None
+
+
+def _json_default(value: Any) -> Any:
+    if isinstance(value, (date, datetime)):
+        return value.isoformat()
+    if hasattr(value, "item"):
+        return value.item()
+    raise TypeError(f"Value of type {type(value).__name__} cannot be persisted.")
+
+
+def _database_payload() -> dict[str, Any]:
+    return json.loads(json.dumps(state, default=_json_default))
+
+
+def _restore_database_payload(payload: dict[str, Any]) -> None:
+    state.clear()
+    state.update(payload)
+    state.setdefault("approvals", {})
+    state.setdefault("workflow_audit", [])
+    state.setdefault("source_blob_path", None)
+
+
+async def _ensure_database_schema(connection: Any) -> None:
+    await connection.execute("""
+        CREATE TABLE IF NOT EXISTS stock_mover_app_state (
+            state_key TEXT PRIMARY KEY,
+            payload JSONB NOT NULL,
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+    """)
+
+
+async def _load_database_payload(connection: Any) -> bool:
+    await _ensure_database_schema(connection)
+    cursor = await connection.execute(
+        "SELECT payload FROM stock_mover_app_state WHERE state_key = 'current'"
+    )
+    row = await cursor.fetchone()
+    if not row:
+        return False
+    _restore_database_payload(row[0])
+    return True
+
+
+async def _save_database_payload(connection: Any) -> None:
+    from psycopg.types.json import Jsonb
+
+    await connection.execute(
+        """
+        INSERT INTO stock_mover_app_state (state_key, payload, updated_at)
+        VALUES ('current', %s, NOW())
+        ON CONFLICT (state_key) DO UPDATE
+        SET payload = EXCLUDED.payload, updated_at = EXCLUDED.updated_at
+        """,
+        (Jsonb(_database_payload()),),
+    )
 
 
 @app.middleware("http")
@@ -60,6 +220,162 @@ async def require_gateway_secret(request: Request, call_next):
         if not hmac.compare_digest(supplied, API_SHARED_SECRET):
             return JSONResponse(status_code=401, content={"detail": "Gateway authentication required."})
     return await call_next(request)
+
+
+@app.middleware("http")
+async def vercel_request_middleware(request: Request, call_next):
+    if not IS_VERCEL or not request.url.path.startswith("/api/"):
+        return await call_next(request)
+
+    path = request.url.path
+    auth_routes = {
+        "/api/auth/status", "/api/auth/demo-login",
+        "/api/auth/login", "/api/auth/logout",
+    }
+    if path in auth_routes:
+        return await call_next(request)
+
+    user = _session_from_request(request)
+    if path != "/api/health" and path != "/api/cron/run" and (DEMO_MODE or APPROVAL_TOKEN):
+        if not user:
+            return JSONResponse(
+                status_code=401,
+                content={"detail": "Sign in with a merchandising account to access this resource."},
+            )
+        permission = _permission_for(request.method, path)
+        if permission and permission not in user["permissions"]:
+            return JSONResponse(
+                status_code=403,
+                content={"detail": f"Your {user['role']} role cannot {permission} this resource."},
+            )
+        forwarded_headers = [
+            (key, value) for key, value in request.scope["headers"]
+            if key.lower() not in {
+                b"x-stockmover-user", b"x-stockmover-role", b"x-stockmover-area-manager",
+            }
+        ]
+        forwarded_headers.extend([
+            (b"x-stockmover-user", user["name"].encode()),
+            (b"x-stockmover-role", user["role"].encode()),
+        ])
+        if user["area_manager_id"]:
+            forwarded_headers.append((
+                b"x-stockmover-area-manager", user["area_manager_id"].encode(),
+            ))
+        request.scope["headers"] = forwarded_headers
+
+    is_mutation = (
+        request.method in {"POST", "PATCH", "PUT", "DELETE"}
+        or path == "/api/cron/run"
+    )
+    try:
+        import psycopg
+
+        async with _state_request_lock:
+            async with await psycopg.AsyncConnection.connect(
+                DATABASE_URL, connect_timeout=8,
+            ) as connection:
+                async with connection.transaction():
+                    if is_mutation:
+                        await connection.execute("SELECT pg_advisory_xact_lock(724106202)")
+                    loaded = await _load_database_payload(connection)
+                    if not loaded:
+                        state["approvals"] = {}
+                        _run_analysis_tables(
+                            build_demo_tables(), "Generated synthetic demo data",
+                            is_demo_data=True,
+                        )
+                    response = await call_next(request)
+                    if is_mutation and response.status_code < 400:
+                        await _save_database_payload(connection)
+                    return response
+    except psycopg.Error as exc:
+        print(f"Vercel state database request failed: {exc}", file=sys.stderr)
+        return JSONResponse(
+            status_code=503,
+            content={"detail": "Persistent app storage is temporarily unavailable."},
+        )
+
+
+class DemoLoginRequest(BaseModel):
+    role: str
+    area_manager_id: str | None = None
+    token: str = ""
+
+
+class TokenLoginRequest(BaseModel):
+    token: str
+
+
+@app.get("/api/auth/status")
+def auth_status(request: Request) -> dict[str, Any]:
+    user = _session_from_request(request)
+    required = DEMO_MODE or bool(APPROVAL_TOKEN)
+    return {
+        "required": required,
+        "demoMode": DEMO_MODE,
+        "authenticated": not required or user is not None,
+        "user": user,
+        "roles": [
+            {"id": role, "name": label}
+            for role, label in (
+                ("admin", "Demo Admin"),
+                ("stock_manager", "Stock Manager"),
+                ("validator", "Rule Validator"),
+                ("area_manager", "Area Manager"),
+                ("analyst", "Sales Analyst"),
+                ("viewer", "Read-only Viewer"),
+            )
+        ],
+        "tokenRequired": bool(APPROVAL_TOKEN),
+    }
+
+
+@app.post("/api/auth/demo-login")
+def demo_login(payload: DemoLoginRequest) -> JSONResponse:
+    if not DEMO_MODE:
+        raise HTTPException(404, "Demo sign-in is disabled.")
+    if payload.role not in _ROLE_PERMISSIONS:
+        raise HTTPException(400, "Choose a valid demo role.")
+    if APPROVAL_TOKEN and not hmac.compare_digest(payload.token, APPROVAL_TOKEN):
+        raise HTTPException(401, "A valid team access token is required.")
+    if payload.role == "area_manager" and not re.fullmatch(
+        r"AM-\d{2}", payload.area_manager_id or "",
+    ):
+        raise HTTPException(400, "Select a valid area manager account.")
+    area_manager_id = payload.area_manager_id if payload.role == "area_manager" else None
+    role_names = {
+        "admin": "Demo Admin",
+        "stock_manager": "Stock Manager",
+        "validator": "Rule Validator",
+        "area_manager": "Area Manager",
+        "analyst": "Sales Analyst",
+        "viewer": "Read-only Viewer",
+    }
+    name = role_names[payload.role]
+    if area_manager_id:
+        name = f"{name} · {area_manager_id}"
+    return _session_response(payload.role, name, area_manager_id)
+
+
+@app.post("/api/auth/login")
+def token_login(payload: TokenLoginRequest) -> JSONResponse:
+    if not APPROVAL_TOKEN:
+        raise HTTPException(404, "Token sign-in is not configured.")
+    if not hmac.compare_digest(payload.token, APPROVAL_TOKEN):
+        raise HTTPException(401, "That access token was not recognised.")
+    return _session_response("admin", "Administrator")
+
+
+@app.post("/api/auth/logout", status_code=204)
+def auth_logout() -> Response:
+    return Response(
+        status_code=204,
+        headers={"set-cookie": (
+            "stock_mover_session=; HttpOnly; Secure; SameSite=Lax; "
+            "Path=/; Max-Age=0"
+        )},
+    )
 
 
 class Decision(BaseModel):
@@ -74,6 +390,43 @@ class LogisticsCompletion(BaseModel):
     sku_verified: bool
     route_verified: bool
     note: str = Field(default="", max_length=500)
+
+
+class BlobUploadRequest(BaseModel):
+    pathname: str
+    filename: str
+
+
+async def _download_blob_to_temp(pathname: str, suffix: str) -> Path:
+    from vercel import blob
+
+    temporary = tempfile.NamedTemporaryFile(
+        prefix="dataset-", suffix=suffix, dir=DATA_DIR, delete=False,
+    )
+    path = Path(temporary.name)
+    size = 0
+    try:
+        with temporary:
+            async with blob.stream_blob(pathname, access="private") as download:
+                if download.metadata.size and download.metadata.size > 200 * 1024 * 1024:
+                    raise HTTPException(413, "File exceeds the 200 MB upload limit.")
+                async for chunk in download:
+                    size += len(chunk)
+                    if size > 200 * 1024 * 1024:
+                        raise HTTPException(413, "File exceeds the 200 MB upload limit.")
+                    temporary.write(chunk)
+        if size == 0:
+            raise HTTPException(400, "Uploaded file is empty.")
+        return path
+    except HTTPException:
+        path.unlink(missing_ok=True)
+        raise
+    except blob.BlobNotFoundError as exc:
+        path.unlink(missing_ok=True)
+        raise HTTPException(404, "Uploaded workbook was not found in private storage.") from exc
+    except (blob.BlobError, OSError) as exc:
+        path.unlink(missing_ok=True)
+        raise HTTPException(502, f"Could not retrieve the uploaded workbook: {exc}") from exc
 
 
 def _product_description(item: dict[str, Any]) -> str:
@@ -170,6 +523,20 @@ def _read_decisions() -> dict[str, Any]:
 
 
 def _write_decisions(move_id: str | None = None, event_type: str | None = None) -> None:
+    if IS_VERCEL:
+        if move_id and event_type:
+            payload = state["approvals"][move_id]
+            state["workflow_audit"].append({
+                "move_id": move_id,
+                "event_type": event_type,
+                "actor": str(payload.get("actor", "")),
+                "role": str(payload.get("role", "")),
+                "occurred_at": str(
+                    payload.get("updated_at") or datetime.now(timezone.utc).isoformat()
+                ),
+                "details": payload,
+            })
+        return
     connection = None
     try:
         connection = sqlite3.connect(DATA_DIR / "manyavar.sqlite3", timeout=10)
@@ -1382,6 +1749,39 @@ def health() -> dict[str, Any]:
     }
 
 
+@app.get("/api/health")
+def api_health() -> dict[str, Any]:
+    return health()
+
+
+@app.get("/api/cron/run")
+async def scheduled_run(request: Request) -> dict[str, Any]:
+    if not CRON_SECRET:
+        raise HTTPException(503, "Scheduled refresh is not configured.")
+    supplied = request.headers.get("authorization", "")
+    if not hmac.compare_digest(supplied, f"Bearer {CRON_SECRET}"):
+        raise HTTPException(401, "Scheduled refresh authorization failed.")
+    source = state.get("source_name")
+    if IS_VERCEL and state.get("source_blob_path"):
+        temporary = await _download_blob_to_temp(
+            state["source_blob_path"], Path(source or "").suffix.lower(),
+        )
+        try:
+            await asyncio.to_thread(_run_analysis, temporary, source)
+        finally:
+            temporary.unlink(missing_ok=True)
+    elif state.get("tables") is not None:
+        await asyncio.to_thread(
+            _run_analysis_tables,
+            state["tables"],
+            source or "Generated synthetic demo data",
+            is_demo_data=bool(state.get("is_demo_data")),
+        )
+    else:
+        raise HTTPException(409, "There is no loaded dataset to refresh.")
+    return {"ok": True, **_summary(state["tables"])}
+
+
 @app.post("/api/upload")
 async def upload(file: UploadFile = File(...)) -> dict[str, Any]:
     suffix = Path(file.filename or "").suffix.lower()
@@ -1396,20 +1796,61 @@ async def upload(file: UploadFile = File(...)) -> dict[str, Any]:
         if not content:
             raise HTTPException(400, "Uploaded file is empty.")
         saved.write_bytes(content)
-        _run_analysis(saved, file.filename)
+        await asyncio.to_thread(_run_analysis, saved, file.filename)
+        if IS_VERCEL:
+            from vercel import blob
+
+            stored = await blob.put_blob(
+                f"datasets/{safe_name}", content, access="private",
+                content_type=file.content_type or "application/octet-stream",
+                add_random_suffix=True,
+            )
+            state["source_blob_path"] = stored.pathname
         return {"ok": True, **_summary(state["tables"])}
     except HTTPException:
         raise
     except (OSError, ValueError, KeyError, zipfile.BadZipFile) as exc:
         saved.unlink(missing_ok=True)
         raise HTTPException(422, f"Could not analyse this dataset: {exc}") from exc
+    finally:
+        if IS_VERCEL:
+            saved.unlink(missing_ok=True)
+
+
+@app.post("/api/upload-blob")
+async def upload_blob(payload: BlobUploadRequest) -> dict[str, Any]:
+    suffix = Path(payload.filename).suffix.lower()
+    if suffix not in {".xlsx", ".zip"}:
+        raise HTTPException(415, "Upload an .xlsx workbook or .zip containing one CSV per table.")
+    if not payload.pathname.startswith("datasets/") or ".." in Path(payload.pathname).parts:
+        raise HTTPException(400, "Invalid private workbook path.")
+    temporary = await _download_blob_to_temp(payload.pathname, suffix)
+    try:
+        await asyncio.to_thread(_run_analysis, temporary, payload.filename)
+        state["source_blob_path"] = payload.pathname
+        return {"ok": True, **_summary(state["tables"])}
+    except (OSError, ValueError, KeyError, zipfile.BadZipFile) as exc:
+        raise HTTPException(422, f"Could not analyse this dataset: {exc}") from exc
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 @app.post("/api/run")
-def run() -> dict[str, Any]:
+async def run() -> dict[str, Any]:
     source = state.get("source_name")
     if not source:
         raise HTTPException(409, "Upload a dataset before running recommendations.")
+    if IS_VERCEL and state.get("source_blob_path"):
+        temporary = await _download_blob_to_temp(
+            state["source_blob_path"], Path(source).suffix.lower(),
+        )
+        try:
+            await asyncio.to_thread(_run_analysis, temporary, source)
+            return {"ok": True, **_summary(state["tables"])}
+        except (OSError, ValueError, KeyError) as exc:
+            raise HTTPException(422, f"Analysis failed: {exc}") from exc
+        finally:
+            temporary.unlink(missing_ok=True)
     candidates = sorted(DATA_DIR.glob("dataset-*"), key=lambda path: path.stat().st_mtime, reverse=True)
     if not candidates:
         if state.get("is_demo_data") and state.get("tables") is not None:
@@ -2174,6 +2615,31 @@ async def _scheduled_refresh() -> None:
 
 @app.on_event("startup")
 async def startup() -> None:
+    if IS_VERCEL:
+        if not DATABASE_URL or not SESSION_SECRET or not APPROVAL_TOKEN or not CRON_SECRET:
+            raise RuntimeError(
+                "Vercel requires DATABASE_URL, APP_SESSION_SECRET, APPROVAL_TOKEN, and CRON_SECRET."
+            )
+        import psycopg
+
+        try:
+            async with await psycopg.AsyncConnection.connect(
+                DATABASE_URL, connect_timeout=8,
+            ) as connection:
+                async with connection.transaction():
+                    await connection.execute("SELECT pg_advisory_xact_lock(724106202)")
+                    loaded = await _load_database_payload(connection)
+                    if not loaded:
+                        state["approvals"] = {}
+                        state["workflow_audit"] = []
+                        _run_analysis_tables(
+                            build_demo_tables(), "Generated synthetic demo data",
+                            is_demo_data=True,
+                        )
+                        await _save_database_payload(connection)
+        except psycopg.Error as exc:
+            raise RuntimeError(f"Could not initialize persistent app storage: {exc}") from exc
+        return
     state["approvals"] = _read_decisions()
     latest = sorted(DATA_DIR.glob("dataset-*"), key=lambda path: path.stat().st_mtime, reverse=True)
     if latest:

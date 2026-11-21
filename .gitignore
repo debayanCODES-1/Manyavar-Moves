@@ -13,3 +13,6 @@ data/
 *.key
 secrets/
 public/runtime-config.js
+.vercel/
+.vercel_python_packages/
+public/app.bundle.js

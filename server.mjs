@@ -77,6 +77,7 @@ function proxy(req, res) {
     });
     res.end(`window.__MANYAVAR_CONFIG__=${JSON.stringify({
       apiBaseUrl: PUBLIC_API_BASE_URL,
+      blobUploads: false,
     })};`);
     return;
   }
@@ -88,6 +89,7 @@ function proxy(req, res) {
       authenticated: !DEMO_MODE && !APPROVAL_TOKEN || Boolean(user),
       user,
       roles: Object.entries(DEMO_ROLES).map(([id, value]) => ({ id, name: value.name })),
+      tokenRequired: Boolean(APPROVAL_TOKEN),
     });
     return;
   }
