@@ -3,6 +3,7 @@ const state = {
   selectedProduct: null, selectedStore: null, products: [],
 };
 const authState = { required: false, authenticated: true, demoMode: false, user: null };
+const demoFaceTemplateKey = "manyavar-demo-face-template-v1";
 const photoUrls = [
   "https://images.unsplash.com/photo-1610030469983-98e550d6193c?auto=format&fit=crop&w=320&q=80",
   "https://images.unsplash.com/photo-1597983073493-88cd35cf93b0?auto=format&fit=crop&w=320&q=80",
@@ -59,6 +60,145 @@ async function updateAuthState() {
     authState.required = false;
   }
 }
+
+function demoFaceVerificationKey() {
+  const user = authState.user;
+  return `manyavar-demo-face-verified:${user?.role || ""}:${user?.area_manager_id || ""}`;
+}
+
+function openDemoFaceCheck() {
+  $("#role-auth-controls").hidden = true;
+  $("#face-demo-panel").hidden = false;
+  $("#auth-close").hidden = true;
+  $("#auth-title").textContent = "Complete the local demo check.";
+  $("#auth-description").textContent = "Your demo role is selected. Camera use is optional and requires your consent.";
+  $("#face-demo-panel").hidden = false;
+  if (!$("#auth-dialog").open) $("#auth-dialog").showModal();
+}
+
+function stopFaceCamera() {
+  const video = $("#face-video");
+  if (video.srcObject) {
+    video.srcObject.getTracks().forEach((track) => track.stop());
+    video.srcObject = null;
+  }
+  video.hidden = true;
+}
+
+async function localFaceDescriptor() {
+  const faceapi = window.faceapi;
+  if (!faceapi) throw new Error("The local face-matching library did not load. Check the app assets and retry.");
+  await Promise.all([
+    faceapi.nets.tinyFaceDetector.loadFromUri("/models"),
+    faceapi.nets.faceLandmark68Net.loadFromUri("/models"),
+    faceapi.nets.faceRecognitionNet.loadFromUri("/models"),
+  ]);
+  if (!navigator.mediaDevices?.getUserMedia) {
+    throw new Error("This browser cannot access a camera. Use HTTPS or localhost and a supported browser.");
+  }
+  const video = $("#face-video");
+  video.srcObject = await navigator.mediaDevices.getUserMedia({
+    video: { facingMode: "user" },
+    audio: false,
+  });
+  video.hidden = false;
+  await video.play();
+  await new Promise((resolve, reject) => {
+    if (video.videoWidth) return resolve();
+    video.addEventListener("loadedmetadata", resolve, { once: true });
+    video.addEventListener("error", () => reject(new Error("The camera preview could not be started.")), { once: true });
+  });
+  const samples = [];
+  for (let index = 0; index < 3; index += 1) {
+    const detections = await faceapi.detectAllFaces(
+      video,
+      new faceapi.TinyFaceDetectorOptions({ inputSize: 224, scoreThreshold: 0.5 }),
+    ).withFaceLandmarks().withFaceDescriptors();
+    if (detections.length !== 1) {
+      throw new Error(detections.length
+        ? "Show only one face to the camera, then retry."
+        : "No face was detected. Improve lighting, face the camera, and retry.");
+    }
+    samples.push(Array.from(detections[0].descriptor));
+    await new Promise((resolve) => setTimeout(resolve, 300));
+  }
+  return samples[0].map((_, index) =>
+    samples.reduce((sum, sample) => sum + sample[index], 0) / samples.length);
+}
+
+function finishDemoFaceCheck() {
+  stopFaceCamera();
+  $("#auth-dialog").close();
+  $("#role-auth-controls").hidden = false;
+  $("#face-demo-panel").hidden = true;
+  loadDashboard();
+}
+
+$("#face-start").addEventListener("click", async () => {
+  if (!$("#face-consent").checked) {
+    $("#face-status").textContent = "Check the consent box before starting the camera.";
+    return;
+  }
+  const button = $("#face-start");
+  button.disabled = true;
+  $("#face-status").textContent = "Loading local models and opening the camera…";
+  try {
+    const descriptor = await localFaceDescriptor();
+    const saved = sessionStorage.getItem(demoFaceTemplateKey);
+    if (!saved) {
+      sessionStorage.setItem(demoFaceTemplateKey, JSON.stringify(descriptor));
+      $("#face-status").textContent = "Demo face enrolled in this tab. The check is not secure authentication.";
+      sessionStorage.setItem(demoFaceVerificationKey(), "enrolled");
+    } else {
+      let enrolled;
+      try {
+        enrolled = JSON.parse(saved);
+      } catch {
+        throw new Error("The tab’s face template is unreadable. Clear it and enroll again.");
+      }
+      if (!Array.isArray(enrolled) || enrolled.length !== descriptor.length) {
+        throw new Error("The tab’s face template is invalid. Clear it and enroll again.");
+      }
+      const distance = Math.sqrt(descriptor.reduce(
+        (sum, value, index) => sum + (value - enrolled[index]) ** 2, 0,
+      ));
+      if (distance > 0.5) {
+        throw new Error("The face did not match this tab’s demo template. Try again or clear and re-enroll.");
+      }
+      $("#face-status").textContent = "Local face match passed for this demo tab.";
+      sessionStorage.setItem(demoFaceVerificationKey(), "matched");
+    }
+    finishDemoFaceCheck();
+  } catch (error) {
+    stopFaceCamera();
+    $("#face-status").textContent = error.message;
+  } finally {
+    button.disabled = false;
+  }
+});
+
+$("#face-skip").addEventListener("click", () => {
+  sessionStorage.setItem(demoFaceVerificationKey(), "skipped");
+  $("#face-status").textContent = "Face matching was skipped. This demo session has no face check.";
+  finishDemoFaceCheck();
+});
+
+$("#face-clear").addEventListener("click", () => {
+  sessionStorage.removeItem(demoFaceTemplateKey);
+  sessionStorage.removeItem(demoFaceVerificationKey());
+  $("#face-status").textContent = "This tab’s face template was cleared. The next check will enroll again.";
+});
+
+$("#face-sign-out").addEventListener("click", async () => {
+  try {
+    await api("/api/auth/logout", { method: "POST" });
+    Object.keys(sessionStorage).filter((key) => key.startsWith("manyavar-demo-face-verified:"))
+      .forEach((key) => sessionStorage.removeItem(key));
+    window.location.reload();
+  } catch (error) {
+    $("#face-status").textContent = error.message;
+  }
+});
 
 function can(permission) {
   return !authState.required || Boolean(authState.user?.permissions?.includes(permission));
@@ -189,7 +329,7 @@ function moveCard(move, index) {
       <div class="move-sub">${escapeHTML(move.category)} · ${escapeHTML(move.sku_id)}</div>
       <div class="move-route"><span>${escapeHTML(move.from_location)}</span><i>→</i><span>${escapeHTML(move.to_location)}</span></div>
       <div class="move-reason">${escapeHTML(move.reason)}</div>
-      <div class="move-meta"><span>ARRIVES <strong>${escapeHTML(new Date(`${move.arrival_date}T00:00:00`).toLocaleDateString("en-IN", { day: "numeric", month: "short" }))}</strong></span><span>VELOCITY <strong>${escapeHTML(move.daily_velocity)} units/day</strong></span><span>MRP VALUE <strong>${rupees(move.move_value_mrp)}</strong></span>${move.stock_age_days ? `<span>OLDEST UNIT <strong>${number(move.stock_age_days)} days</strong></span>` : ""}${move.donor_cover_after_days ? `<span>DONOR COVER <strong>${escapeHTML(move.donor_cover_after_days)} days</strong></span>` : ""}</div>
+      <div class="move-meta"><span>ARRIVES <strong>${escapeHTML(new Date(`${move.arrival_date}T00:00:00`).toLocaleDateString("en-IN", { day: "numeric", month: "short" }))}</strong></span><span>VELOCITY <strong>${escapeHTML(move.daily_velocity)} units/day</strong></span><span>MRP VALUE <strong>${rupees(move.move_value_mrp)}</strong></span><span title="${escapeHTML(move.margin_basis)}">${move.estimated_gross_profit_14d == null ? "GROSS PROFIT EST." : `${rupees(move.estimated_gross_profit_14d)} · ${move.estimated_gross_margin_pct}%`}<strong>14-day estimate · ${number(move.estimated_sell_through_units_14d)} expected units</strong></span>${move.stock_age_days ? `<span>OLDEST UNIT <strong>${number(move.stock_age_days)} days</strong></span>` : ""}${move.donor_cover_after_days ? `<span>DONOR COVER <strong>${escapeHTML(move.donor_cover_after_days)} days</strong></span>` : ""}</div>
     </div>
     <div class="move-actions"><div class="move-qty">${number(move.qty)}<small>units</small></div>${actionButtons}</div>
   </article>`;
@@ -217,7 +357,7 @@ function logisticsMoveCard(move, status) {
     <h3>${escapeHTML(moveTitle(move))}</h3>
     <div class="move-sub">${escapeHTML(move.category)} · SKU ${escapeHTML(move.sku_id)}</div>
     <div class="logistics-route"><span>${escapeHTML(move.from_location)}</span><i>→</i><span>${escapeHTML(move.to_location)}</span><small>Expected ${escapeHTML(new Date(`${move.arrival_date}T00:00:00`).toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" }))}</small></div>
-    <div class="logistics-evidence"><span>RECOMMENDED QTY<strong>${number(move.qty)} units</strong></span><span>MRP VALUE<strong>${rupees(move.move_value_mrp)}</strong></span><span>DEMAND RATE<strong>${escapeHTML(move.daily_velocity)} / day</strong></span></div>
+    <div class="logistics-evidence"><span>RECOMMENDED QTY<strong>${number(move.qty)} units</strong></span><span>MRP VALUE<strong>${rupees(move.move_value_mrp)}</strong></span><span>DEMAND RATE<strong>${escapeHTML(move.daily_velocity)} / day</strong></span><span title="${escapeHTML(move.margin_basis)}">GROSS PROFIT · 14D<strong>${move.estimated_gross_profit_14d == null ? "—" : `${rupees(move.estimated_gross_profit_14d)} · ${move.estimated_gross_margin_pct}%`}</strong></span></div>
     <p class="logistics-reason">${escapeHTML(move.reason)}</p>
     <div class="logistics-action">${action}</div>
   </article>`;
@@ -290,8 +430,9 @@ function renderStores() {
     <td>${escapeHTML(store.area_manager_id || "—")}</td><td>${number(store.stock_units)}</td>
     <td class="capacity-cell">${store.capacity_pct}%<div class="capacity-track"><i style="width:${Math.min(100, store.capacity_pct)}%"></i></div></td>
     <td>${rupees(store.sales_revenue)}</td><td>${number(store.units_sold)}</td>
+    <td>${number(store.bill_count)}</td>
     <td>${number(store.footfall)}</td><td>${store.visit_to_bill_pct}%</td><td>${store.avg_staff_present}</td></tr>`).join("")
-    : '<tr><td colspan="10" class="empty-cell">Upload your dataset to see store-level performance.</td></tr>';
+    : '<tr><td colspan="11" class="empty-cell">Upload your dataset to see store-level performance.</td></tr>';
 }
 
 function renderModel() {
@@ -423,12 +564,16 @@ async function loadProductDetail(skuId) {
         <div><span>WAREHOUSE</span><strong>${number(product.warehouse_units)}</strong></div>
         <div><span>RECENT VELOCITY</span><strong>${product.recent_velocity == null ? "Unknown" : `${product.recent_velocity} / day`}</strong></div>
         <div><span>OLDEST UNIT AGE</span><strong>${number(product.oldest_stock_age_days)} days</strong></div>
+        <div><span>GROSS MARGIN PROXY</span><strong>${product.gross_margin_pct_estimate == null ? "Unknown" : `${product.gross_margin_pct_estimate}% · ${rupees(product.unit_gross_margin_estimate)}/unit`}</strong></div>
       </div>
       <div class="chart-pair"><section><div class="mini-heading"><strong>Weekly sell-through</strong><span>12 weeks</span></div><div id="product-sales-chart" class="trend-chart"></div></section>
         <section><div class="mini-heading"><strong>Closing stock</strong><span>Store network</span></div><div id="product-stock-chart" class="trend-chart"></div></section></div>
       <div class="panel-heading store-performance-heading"><div><span class="eyebrow muted-eyebrow">SAME SKU · EVERY STORE</span><h3>Where the style sells and where it waits</h3></div></div>
-      <div class="table-wrap"><table class="data-table compact-table"><thead><tr><th>STORE</th><th>RECENT UNITS</th><th>12-WK IN-STOCK DAYS</th><th>RECENT VELOCITY</th><th>ON HAND</th><th>IN TRANSIT</th><th>COVER</th><th>OLDEST UNIT</th></tr></thead><tbody>${product.store_performance.map((store) => `<tr><td><strong>${escapeHTML(store.store_id)}</strong><div class="move-sub">${escapeHTML(store.city)} · ${escapeHTML(store.tier)}</div></td><td>${number(store.recent_units)}</td><td>${number(store.recent_in_stock_days)}</td><td>${store.recent_velocity == null ? '<span class="unknown-tag">NO EXPOSURE</span>' : `${store.recent_velocity} / day`}</td><td>${number(store.on_hand)}</td><td>${number(store.in_transit)}</td><td>${store.cover_days == null ? "—" : `${number(store.cover_days)} days`}</td><td>${store.stock_age_days == null ? "—" : `${number(store.stock_age_days)} days`}</td></tr>`).join("")}</tbody></table></div>
-      <div class="data-disclaimer">${product.unsold_locations.length ? `${product.unsold_locations.length} location(s) have stock and recorded availability but no sales in the recent 12-week window.` : "No stock-held location has both recorded recent availability and zero sales."} This is an exposure-aware signal, not a claim that the style will never sell.</div>`;
+      <div class="table-wrap"><table class="data-table compact-table"><thead><tr><th>STORE</th><th>RECENT UNITS</th><th>12-WK IN-STOCK DAYS</th><th>RECENT VELOCITY</th><th>ON HAND</th><th>IN TRANSIT</th><th>COVER</th><th>OLDEST UNIT</th><th>LAST SALE</th><th>SEASON / DESIGN SIGNAL</th></tr></thead><tbody>${product.store_performance.map((store) => `<tr><td><strong>${escapeHTML(store.store_id)}</strong><div class="move-sub">${escapeHTML(store.city)} · ${escapeHTML(store.tier)}</div></td><td>${number(store.recent_units)}</td><td>${number(store.recent_in_stock_days)}</td><td>${store.recent_velocity == null ? '<span class="unknown-tag">NO EXPOSURE</span>' : `${store.recent_velocity} / day`}</td><td>${number(store.on_hand)}</td><td>${number(store.in_transit)}</td><td>${store.cover_days == null ? "—" : `${number(store.cover_days)} days`}</td><td>${store.stock_age_days == null ? "—" : `${number(store.stock_age_days)} days`}</td><td>${escapeHTML(store.last_sale_date || "No sale recorded")}</td><td>${store.stock_risk === "seasonal_7_day_no_sale" ? '<span class="risk-tag">FESTIVAL · 7D</span>' : store.stock_risk === "no_sales_after_new_design" ? '<span class="risk-tag">NEWER DESIGN</span>' : "—"}</td></tr>`).join("")}</tbody></table></div>
+      <div class="data-disclaimer">${product.unsold_locations.length ? `${product.unsold_locations.length} location(s) have stock and recorded availability but no sales in the recent 12-week window.` : "No stock-held location has both recorded recent availability and zero sales."} ${escapeHTML(product.margin_basis)}. Selling prices and MRP are GST-inclusive and cost is illustrative, so gross margin is a directional pre-tax/overhead estimate, not realized profit. ${escapeHTML(result.similarity_notice)}</div>
+      <section class="similar-products"><div class="mini-heading"><strong>Similar styles selling now</strong><span>Demand leads, not automatic transfer approvals</span></div>
+        <div class="similar-product-list">${result.similar_products.map((item) => `<div><span><strong>${escapeHTML(item.style_name || item.sku_id)}</strong><small>${escapeHTML(item.sku_id)} · ${escapeHTML(item.size)} · ${escapeHTML(item.demand_store || "Network")} · ${escapeHTML(item.similarity_basis)}</small></span><b>${number(item.demand_store_recent_units)} <small>recent units</small></b></div>`).join("") || '<span class="empty-note">No same-category, same-size styles in the 30% price band have recorded recent demand.</span>'}</div>
+        <p>Fabric/material details are absent from the source catalogue and are not inferred.</p></section>`;
     renderTrendChart($("#product-sales-chart"), trendRows, "units", "#b97542", "units sold");
     renderTrendChart($("#product-stock-chart"), trendRows, "stock", "#26847c", "units in stock");
   } catch (error) {
@@ -450,10 +595,29 @@ async function loadStoreDetail(storeId) {
     const result = await api(`/api/stores/${encodeURIComponent(storeId)}`);
     const store = result.store;
     target.innerHTML = `<div class="panel-heading"><div><span class="eyebrow muted-eyebrow">${escapeHTML(store.tier)} · ${escapeHTML(store.city)}</span><h3>${escapeHTML(store.store_id)} · Store detail</h3></div><span class="grade-tag">${number(store.capacity_pct)}% CAPACITY</span></div>
+      <div class="store-detail-kpis">
+        <div><span>SALES VALUE</span><strong>${rupees(store.sales_revenue)}</strong></div>
+        <div><span>UNITS SOLD</span><strong>${number(store.units_sold)}</strong></div>
+        <div><span>BILLS · ALL DATA</span><strong>${number(store.bill_count)}</strong></div>
+        <div><span>RECENT BILLS</span><strong>${number(store.recent_bills)}</strong></div>
+        <div><span>AVERAGE BILL</span><strong>${rupees(store.average_bill_value)}</strong></div>
+        <div><span>FOOTFALL</span><strong>${number(store.footfall)}</strong></div>
+        <div><span>VISIT → BILL</span><strong>${number(store.visit_to_bill_pct)}%</strong></div>
+        <div><span>AVG STAFF PRESENT</span><strong>${number(store.avg_staff_present)}</strong></div>
+      </div>
       <div class="store-detail-grid"><div><div class="mini-heading"><strong>Weekly sell-through</strong><span>Recent 12 weeks</span></div><div id="store-sales-chart" class="trend-chart"></div></div><div><div class="mini-heading"><strong>Weekly closing stock</strong><span>Store stock</span></div><div id="store-stock-chart" class="trend-chart"></div></div></div>
       <div class="store-detail-grid"><div><div class="mini-heading"><strong>Top sellers</strong><span>Store-specific</span></div><div class="ranked-list">${result.best_sellers.map((item, index) => `<div><i>${String(index + 1).padStart(2, "0")}</i><span><strong>${escapeHTML(item.style_name || item.sku_id)}</strong><small>${escapeHTML(item.sku_id)} · ${escapeHTML(item.category)}</small></span><b>${number(item.store_metrics.recent_units)} <small>12 wk</small></b></div>`).join("") || '<span class="empty-note">No sales recorded in this window.</span>'}</div></div>
-        <div><div class="mini-heading"><strong>Unsold with stock</strong><span>Recent exposure confirmed</span></div><div class="ranked-list">${result.dormant_stock.slice(0, 8).map((item) => `<div><i class="dormant-mark">!</i><span><strong>${escapeHTML(item.style_name || item.sku_id)}</strong><small>${escapeHTML(item.sku_id)} · ${number(item.store_metrics.recent_in_stock_days)} in-stock days</small></span><b>${number(item.store_metrics.stock_units)} <small>units</small></b></div>`).join("") || '<span class="empty-note">No exposure-confirmed dormant stock.</span>'}</div></div></div>
+        <div><div class="mini-heading"><strong>Unsold with stock</strong><span>12-week exposure confirmed</span></div><div class="ranked-list">${result.dormant_stock.slice(0, 8).map((item) => `<div><i class="dormant-mark">!</i><span><strong>${escapeHTML(item.style_name || item.sku_id)}</strong><small>${escapeHTML(item.sku_id)} · ${number(item.store_metrics.recent_in_stock_days)} in-stock days · no sales in period</small></span><b>${number(item.store_metrics.stock_units)} <small>units</small></b></div>`).join("") || '<span class="empty-note">No exposure-confirmed dormant stock.</span>'}</div></div></div>
+      <div class="store-risk-panel"><div class="mini-heading"><strong>Season / new-design stock signals</strong><span>Review before moving; not proof of dead stock</span></div>
+        <div class="ranked-list">${result.stock_risk.map((item) => {
+          const metric = item.store_metrics;
+          const similar = item.similar_demand?.[0];
+          return `<div><i class="dormant-mark">!</i><span><strong>${escapeHTML(item.style_name || item.sku_id)}</strong><small>${escapeHTML(item.sku_id)} · ${metric.stock_risk === "seasonal_7_day_no_sale" ? "festival/wedding · no sale ≥7 days" : `newer design · launched ${escapeHTML(metric.successor_launch_date || "")}`} · last sale ${escapeHTML(metric.last_sale_date || "not recorded")}</small><small>${escapeHTML(metric.stock_risk_reason || "")}${similar ? ` Similar-style demand: ${escapeHTML(similar.sku_id)} at ${escapeHTML(similar.demand_store || "another store")} (${number(similar.demand_store_recent_units)} units).` : ""}</small></span><b>${number(metric.stock_units)} <small>units</small></b></div>`;
+        }).join("") || '<span class="empty-note">No seasonal or newer-design risk signal with confirmed stock exposure.</span>'}</div>
+        <p>Similar-style demand is based on category, size and price only; it is a review lead, not an automatic move. Material details are not present in the catalogue.</p></div>
       <div class="mini-heading"><strong>Category stock position</strong><span>Units on hand + in transit</span></div><div class="category-chip-list">${result.category_stock.map((item) => `<span>${escapeHTML(item.category)} <b>${number(item.units)}</b></span>`).join("")}</div>`;
+    target.insertAdjacentHTML("beforeend", `<section class="store-bills"><div class="mini-heading"><strong>Recent bills</strong><span>Latest bills in the recorded footfall period</span></div>
+      <div class="table-wrap"><table class="data-table compact-table"><thead><tr><th>DATE</th><th>BILL</th><th>TOP ITEM</th><th>UNITS</th><th>VALUE</th></tr></thead><tbody>${result.recent_bills.map((bill) => `<tr><td>${escapeHTML(bill.bill_date)}</td><td>${escapeHTML(bill.bill_id)}</td><td>${escapeHTML(bill.top_sku_name || "—")}<div class="move-sub">${escapeHTML(bill.top_sku_id || "")}</div></td><td>${number(bill.units)}</td><td><strong>${rupees(bill.revenue)}</strong></td></tr>`).join("") || '<tr><td colspan="5" class="empty-cell">No bills are recorded in this period.</td></tr>'}</tbody></table></div></section>`);
     renderTrendChart($("#store-sales-chart"), result.weekly_trend, "sales_units", "#456db1", "units sold");
     renderTrendChart($("#store-stock-chart"), result.weekly_trend, "stock_units", "#26847c", "units in stock");
   } catch (error) {
@@ -773,6 +937,8 @@ $("#auth-form").addEventListener("submit", async (event) => {
       headers: { "content-type": "application/json" },
       body: JSON.stringify(body),
     });
+    Object.keys(sessionStorage).filter((key) => key.startsWith("manyavar-demo-face-verified:"))
+      .forEach((key) => sessionStorage.removeItem(key));
     window.location.reload();
   } catch (error) {
     toast(error.message, true);
@@ -785,6 +951,12 @@ async function initialize() {
     $("#app-loader").classList.add("is-hidden");
     $("#auth-close").hidden = true;
     $("#auth-dialog").showModal();
+    return;
+  }
+  if (authState.demoMode && authState.authenticated && authState.user
+      && !sessionStorage.getItem(demoFaceVerificationKey())) {
+    $("#app-loader").classList.add("is-hidden");
+    openDemoFaceCheck();
     return;
   }
   await loadDashboard();

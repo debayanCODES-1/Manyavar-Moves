@@ -1,4 +1,6 @@
 import io
+import json
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -31,6 +33,14 @@ def workbook_bytes(tables):
 
 def api_fixture():
     tables = fixture()
+    tables["items"][0].update({
+        "size": "M", "mrp": 10000, "cost_price": 4000,
+        "launch_date": "2025-01-01",
+    })
+    for store in tables["stores"]:
+        store["state"] = "Uttar Pradesh"
+    for line in tables["bill_lines"]:
+        line["selling_price"] = 7000
     tables["stock_snapshot"][2]["on_hand"] = 20
     weekly_rows = []
     for row in tables["stock_weekly"]:
@@ -53,6 +63,86 @@ class APIUploadTests(unittest.TestCase):
                      if row["store_id"] == "REC")
         self.assertIsNone(store["recent_velocity"])
         self.assertFalse(store["unsold_with_exposure"])
+
+    def test_festival_stock_risk_requires_seven_days_without_sales_and_exposure(self):
+        source = api_fixture()
+        source["bills"] = []
+        source["bill_lines"] = []
+        source["calendar"] = [{
+            "date": "2026-10-29", "state": "Uttar Pradesh",
+            "festival": "Durga Puja", "is_wedding_date": 0,
+        }]
+        source["stock_snapshot"][0]["on_hand"] = 5
+        analytics = api._build_analytics(source)
+        store = next(row for row in analytics["products"]["KUR-01-M"]["store_performance"]
+                     if row["store_id"] == "REC")
+        self.assertEqual(store["stock_risk"], "seasonal_7_day_no_sale")
+
+        source["stock_weekly"] = [
+            {**row, "days_in_stock": 0} for row in source["stock_weekly"]
+        ]
+        analytics = api._build_analytics(source)
+        store = next(row for row in analytics["products"]["KUR-01-M"]["store_performance"]
+                     if row["store_id"] == "REC")
+        self.assertIsNone(store["stock_risk"])
+
+    def test_normal_season_signal_uses_exposure_after_a_newer_design_launch(self):
+        source = api_fixture()
+        source["bills"] = []
+        source["bill_lines"] = []
+        source["items"].append({
+            "sku_id": "KUR-02-M", "style_id": "KUR-02", "style_name": "New Kurta",
+            "category": "Kurta Set", "size": "M", "mrp": 11000,
+            "cost_price": 4500, "launch_date": "2026-10-20", "is_packaging": 0,
+        })
+        analytics = api._build_analytics(source)
+        donor = next(row for row in analytics["products"]["KUR-01-M"]["store_performance"]
+                     if row["store_id"] == "DON")
+        self.assertEqual(donor["stock_risk"], "no_sales_after_new_design")
+        self.assertEqual(donor["successor_launch_date"], "2026-10-20")
+
+    def test_margin_uses_recent_discounted_selling_price_and_similarity_uses_available_fields(self):
+        source = api_fixture()
+        source["items"].append({
+            "sku_id": "KUR-02-M", "style_id": "KUR-02", "style_name": "New Kurta",
+            "category": "Kurta Set", "size": "M", "mrp": 11000,
+            "cost_price": 4500, "launch_date": "2026-09-01", "is_packaging": 0,
+        })
+        source["bills"].append({
+            "bill_id": "B-SIM", "bill_date": "2026-10-20", "store_id": "REC",
+        })
+        source["bill_lines"].append({
+            "bill_id": "B-SIM", "sku_id": "KUR-02-M", "qty": 20,
+            "selling_price": 8000,
+        })
+        source["stock_snapshot"].append({
+            "as_of_date": "2026-10-31", "location_id": "REC",
+            "sku_id": "KUR-02-M", "on_hand": 2, "in_transit": 0,
+        })
+        source["stock_weekly"].extend([
+            {"week_ending": week, "store_id": "REC", "sku_id": "KUR-02-M",
+             "closing_on_hand": 2, "days_in_stock": 7}
+            for week in ("2026-10-17", "2026-10-24", "2026-10-31")
+        ])
+        analytics = api._build_analytics(source)
+        product = analytics["products"]["KUR-01-M"]
+        self.assertEqual(product["average_selling_price"], 7000)
+        self.assertEqual(product["unit_gross_margin_estimate"], 3000)
+        self.assertAlmostEqual(product["gross_margin_pct_estimate"], 42.86, places=2)
+
+        previous = dict(api.state)
+        try:
+            api.state["approvals"] = {}
+            api._run_analysis_tables(source, "test catalogue")
+            similar = api.product_detail("KUR-01-M")["similar_products"]
+            self.assertEqual(similar[0]["sku_id"], "KUR-02-M")
+            self.assertFalse(similar[0]["material_match_available"])
+            self.assertEqual(similar[0]["demand_store"], "REC")
+            self.assertTrue(api.state["moves"])
+            self.assertIsNotNone(api.state["moves"][0]["estimated_gross_profit_14d"])
+        finally:
+            api.state.clear()
+            api.state.update(previous)
 
     def test_packaging_lines_do_not_rank_as_merchandise_sales(self):
         source = api_fixture()
@@ -78,7 +168,6 @@ class APIUploadTests(unittest.TestCase):
             data_dir = Path(directory)
             try:
                 with patch.object(api, "DATA_DIR", data_dir), \
-                        patch.object(api, "DECISIONS_PATH", data_dir / "decisions.json"), \
                         TestClient(api.app) as client:
                     summary = client.get("/api/summary").json()
                     self.assertTrue(summary["has_data"])
@@ -100,7 +189,6 @@ class APIUploadTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             data_dir = Path(directory)
             with patch.object(api, "DATA_DIR", data_dir), \
-                    patch.object(api, "DECISIONS_PATH", data_dir / "decisions.json"), \
                     TestClient(api.app) as client:
                 response = client.post(
                     "/api/upload",
@@ -216,8 +304,33 @@ class APIUploadTests(unittest.TestCase):
                 self.assertEqual(persisted["actor"], "Rule Validator")
                 self.assertIn("completed_at", persisted["completion"])
                 self.assertIn("move_snapshot", persisted)
+                with sqlite3.connect(data_dir / "manyavar.sqlite3") as connection:
+                    events = connection.execute(
+                        "SELECT event_type FROM workflow_audit WHERE move_id = ? ORDER BY id",
+                        (candidate["id"],),
+                    ).fetchall()
+                self.assertEqual(
+                    [row[0] for row in events],
+                    ["decision_approved", "logistics_completed"],
+                )
         api.state.clear()
         api.state.update(previous)
+
+    def test_legacy_json_decisions_migrate_to_sqlite(self):
+        with tempfile.TemporaryDirectory() as directory:
+            data_dir = Path(directory)
+            data_dir.joinpath("decisions.json").write_text(json.dumps({
+                "move-1": {"status": "approved", "updated_at": "2026-10-31T12:00:00Z"},
+            }), encoding="utf-8")
+            with patch.object(api, "DATA_DIR", data_dir):
+                decisions = api._read_decisions()
+            self.assertEqual(decisions["move-1"]["status"], "approved")
+            with sqlite3.connect(data_dir / "manyavar.sqlite3") as connection:
+                row = connection.execute(
+                    "SELECT payload_json FROM workflow_decisions WHERE move_id = ?",
+                    ("move-1",),
+                ).fetchone()
+            self.assertEqual(json.loads(row[0])["status"], "approved")
 
     def test_synthetic_demo_matches_network_and_catalogue_size(self):
         tables = build_demo_tables()

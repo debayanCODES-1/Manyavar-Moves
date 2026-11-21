@@ -3,7 +3,7 @@
 An approval-first inventory decision system for the Manyavar stock-movement
 brief. The product combines a Node.js web/API gateway, a Python FastAPI data and
 decision service, a LightGBM demand forecast, constrained move selection,
-deterministic rule validation, persisted approvals, and an optional Gemini
+deterministic rule validation, SQLite-backed workflow/audit history, and an optional Gemini
 merchandising copilot.
 
 The UI pairs Manyavar's ivory and maroon identity with jade, indigo, and amber

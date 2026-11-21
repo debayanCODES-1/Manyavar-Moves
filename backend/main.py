@@ -8,6 +8,7 @@ import hashlib
 import io
 import json
 import os
+import sqlite3
 import sys
 import tempfile
 import urllib.error
@@ -36,7 +37,6 @@ from backend.app.optimizer import optimize_proposals  # noqa: E402
 
 DATA_DIR = Path(os.environ.get("DATA_DIR", ROOT / "data"))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
-DECISIONS_PATH = DATA_DIR / "decisions.json"
 
 app = FastAPI(title="Manyavar Stock Mover API", version="1.0.0")
 state: dict[str, Any] = {
@@ -89,18 +89,104 @@ class Question(BaseModel):
 
 
 def _read_decisions() -> dict[str, Any]:
+    legacy_path = DATA_DIR / "decisions.json"
     try:
-        return json.loads(DECISIONS_PATH.read_text(encoding="utf-8"))
+        legacy = json.loads(legacy_path.read_text(encoding="utf-8"))
     except FileNotFoundError:
-        return {}
+        legacy = {}
     except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"Could not read legacy approval decisions: {exc}") from exc
+
+    connection = None
+    try:
+        connection = sqlite3.connect(DATA_DIR / "manyavar.sqlite3", timeout=10)
+        with connection:
+            connection.execute("""
+                CREATE TABLE IF NOT EXISTS workflow_decisions (
+                    move_id TEXT PRIMARY KEY,
+                    payload_json TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+            """)
+            connection.execute("""
+                CREATE TABLE IF NOT EXISTS workflow_audit (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    move_id TEXT NOT NULL,
+                    event_type TEXT NOT NULL,
+                    actor TEXT NOT NULL,
+                    role TEXT NOT NULL,
+                    occurred_at TEXT NOT NULL,
+                    details_json TEXT NOT NULL
+                )
+            """)
+            stored = connection.execute(
+                "SELECT COUNT(*) FROM workflow_decisions"
+            ).fetchone()[0]
+            if not stored and legacy:
+                connection.executemany(
+                    "INSERT INTO workflow_decisions (move_id, payload_json, updated_at) "
+                    "VALUES (?, ?, ?)",
+                    [
+                        (move_id, json.dumps(payload), str(payload.get("updated_at", "")))
+                        for move_id, payload in legacy.items()
+                    ],
+                )
+            rows = connection.execute(
+                "SELECT move_id, payload_json FROM workflow_decisions"
+            ).fetchall()
+        return {move_id: json.loads(payload) for move_id, payload in rows}
+    except (OSError, sqlite3.Error, json.JSONDecodeError, TypeError, AttributeError) as exc:
         raise RuntimeError(f"Could not read persisted approval decisions: {exc}") from exc
+    finally:
+        if connection is not None:
+            connection.close()
 
 
-def _write_decisions() -> None:
-    temporary = DECISIONS_PATH.with_suffix(".tmp")
-    temporary.write_text(json.dumps(state["approvals"], indent=2), encoding="utf-8")
-    temporary.replace(DECISIONS_PATH)
+def _write_decisions(move_id: str | None = None, event_type: str | None = None) -> None:
+    connection = None
+    try:
+        connection = sqlite3.connect(DATA_DIR / "manyavar.sqlite3", timeout=10)
+        with connection:
+            connection.execute("""
+                CREATE TABLE IF NOT EXISTS workflow_decisions (
+                    move_id TEXT PRIMARY KEY,
+                    payload_json TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+            """)
+            connection.execute("""
+                CREATE TABLE IF NOT EXISTS workflow_audit (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    move_id TEXT NOT NULL,
+                    event_type TEXT NOT NULL,
+                    actor TEXT NOT NULL,
+                    role TEXT NOT NULL,
+                    occurred_at TEXT NOT NULL,
+                    details_json TEXT NOT NULL
+                )
+            """)
+            for decision_id, payload in state["approvals"].items():
+                connection.execute(
+                    "INSERT INTO workflow_decisions (move_id, payload_json, updated_at) "
+                    "VALUES (?, ?, ?) ON CONFLICT(move_id) DO UPDATE SET "
+                    "payload_json=excluded.payload_json, updated_at=excluded.updated_at",
+                    (decision_id, json.dumps(payload), str(payload.get("updated_at", ""))),
+                )
+            if move_id and event_type:
+                payload = state["approvals"][move_id]
+                occurred_at = str(payload.get("updated_at") or datetime.now(timezone.utc).isoformat())
+                connection.execute(
+                    "INSERT INTO workflow_audit "
+                    "(move_id, event_type, actor, role, occurred_at, details_json) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (move_id, event_type, str(payload.get("actor", "")),
+                     str(payload.get("role", "")), occurred_at, json.dumps(payload)),
+                )
+    except (OSError, sqlite3.Error, TypeError, KeyError) as exc:
+        raise RuntimeError(f"Could not persist approval decisions: {exc}") from exc
+    finally:
+        if connection is not None:
+            connection.close()
 
 
 def _read_source(path: Path) -> dict[str, list[dict[str, Any]]]:
@@ -126,6 +212,29 @@ def _read_source(path: Path) -> dict[str, list[dict[str, Any]]]:
 def _build_analytics(tables: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
     items = {str(field(row, "sku_id", default="")): row for row in tables["items"]}
     stores = {str(field(row, "store_id", default="")): row for row in tables["stores"]}
+    launch_dates = {
+        sku: as_date(field(item, "launch_date"))
+        for sku, item in items.items()
+    }
+    launches_by_assortment: dict[tuple[str, str], list[tuple[str, date]]] = defaultdict(list)
+    for sku, item in items.items():
+        launch = launch_dates[sku]
+        category = str(field(item, "category", default="")).casefold()
+        size = str(field(item, "size", default="")).casefold()
+        style_id = str(field(item, "style_id", default=""))
+        if launch and category and size and not as_number(field(item, "is_packaging")):
+            launches_by_assortment[category, size].append((style_id, launch))
+    calendar_events: dict[str, set[date]] = defaultdict(set)
+    for row in tables.get("calendar", []):
+        event_date = as_date(field(row, "date"))
+        festival = str(field(row, "festival", default="")).casefold()
+        seasonal_festival = any(term in festival for term in (
+            "durga", "navratri", "navaratri", "wedding", "vivah",
+        ))
+        if event_date and (
+            as_number(field(row, "is_wedding_date")) or seasonal_festival
+        ):
+            calendar_events[str(field(row, "state", default="")).casefold()].add(event_date)
     bills = {
         str(field(row, "bill_id", default="")): {
             "bill_id": str(field(row, "bill_id", default="")),
@@ -143,6 +252,17 @@ def _build_analytics(tables: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
     })
     as_of = max(weekly_dates, default=_date_range(tables)[1] or date.today())
     recent_start = as_of - timedelta(days=83)
+    successor_launch = {}
+    for sku, item in items.items():
+        own_launch = launch_dates[sku]
+        category = str(field(item, "category", default="")).casefold()
+        size = str(field(item, "size", default="")).casefold()
+        style_id = str(field(item, "style_id", default=""))
+        candidates = [
+            launch for other_style, launch in launches_by_assortment[category, size]
+            if own_launch and other_style != style_id and own_launch < launch <= as_of
+        ]
+        successor_launch[sku] = max(candidates, default=None)
     units_by_sku = defaultdict(int)
     revenue_by_sku = defaultdict(float)
     recent_units_by_sku = defaultdict(int)
@@ -151,6 +271,8 @@ def _build_analytics(tables: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
     revenue_by_store_sku = defaultdict(float)
     recent_units_by_store_sku = defaultdict(int)
     recent_revenue_by_store_sku = defaultdict(float)
+    last_sale_by_store_sku = {}
+    sales_since_successor_by_store_sku = defaultdict(int)
     sales_weekly = defaultdict(lambda: defaultdict(int))
     store_sales_weekly = defaultdict(lambda: defaultdict(int))
     sku_store_sales_weekly = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
@@ -187,6 +309,14 @@ def _build_analytics(tables: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
                 if store_id in stores:
                     recent_units_by_store_sku[store_id, sku] += qty
                     recent_revenue_by_store_sku[store_id, sku] += revenue
+            if store_id in stores and qty > 0:
+                key = (store_id, sku)
+                last_sale_by_store_sku[key] = max(
+                    bill_date, last_sale_by_store_sku.get(key, date.min)
+                )
+                design_launch = successor_launch.get(sku)
+                if design_launch and bill_date >= design_launch:
+                    sales_since_successor_by_store_sku[key] += qty
 
     snapshot = defaultdict(lambda: {"on_hand": 0, "in_transit": 0, "oldest": None})
     for row in tables["stock_snapshot"]:
@@ -200,6 +330,8 @@ def _build_analytics(tables: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
             stock["oldest"] = received
 
     availability_days = defaultdict(int)
+    successor_exposure_days = defaultdict(int)
+    latest_week_exposure = {}
     stock_weekly = defaultdict(lambda: defaultdict(int))
     store_stock_weekly = defaultdict(lambda: defaultdict(int))
     sku_store_stock_weekly = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
@@ -217,12 +349,53 @@ def _build_analytics(tables: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
         )
         if recent_start <= week <= as_of:
             availability_days[store_id, sku] += int(as_number(field(row, "days_in_stock")))
+        if store_id in stores:
+            exposure = int(as_number(field(row, "days_in_stock")))
+            launch = successor_launch.get(sku)
+            if launch and week >= launch:
+                possible_days = min(7, (week - launch).days + 1)
+                successor_exposure_days[store_id, sku] += min(exposure, possible_days)
+            current = latest_week_exposure.get((store_id, sku))
+            if current is None or week > current[0]:
+                latest_week_exposure[store_id, sku] = (week, exposure)
+            elif week == current[0]:
+                latest_week_exposure[store_id, sku] = (
+                    week, min(7, current[1] + exposure)
+                )
 
     product_index = {}
     for sku, item in items.items():
         store_performance = []
         store_stock_units = warehouse_units = recent_exposure_days = 0
         max_age_days = 0
+        recent_price = (
+            recent_revenue_by_sku[sku] / recent_units_by_sku[sku]
+            if recent_units_by_sku[sku] else None
+        )
+        historical_price = (
+            revenue_by_sku[sku] / units_by_sku[sku] if units_by_sku[sku] else None
+        )
+        margin_price = (
+            recent_price if recent_price is not None
+            else historical_price if historical_price is not None
+            else as_number(field(item, "mrp"))
+        )
+        raw_cost_price = field(item, "cost_price", default=None)
+        cost_price = as_number(raw_cost_price)
+        unit_margin = (
+            margin_price - cost_price
+            if margin_price is not None and raw_cost_price not in (None, "") else None
+        )
+        margin_basis = (
+            "recent realized selling price (post-discount)"
+            if recent_price is not None
+            else "all-time realized selling price (post-discount)"
+            if historical_price is not None
+            else "MRP estimate; no realized selling price recorded"
+        )
+        if raw_cost_price in (None, ""):
+            margin_basis += "; cost price not supplied, margin unavailable"
+        design_launch = successor_launch.get(sku)
         for store_id, store in stores.items():
             stock = snapshot[store_id, sku]
             on_hand = stock["on_hand"]
@@ -235,7 +408,44 @@ def _build_analytics(tables: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
             age_days = max(0, (as_of - stock["oldest"]).days) if stock["oldest"] else None
             if age_days is not None:
                 max_age_days = max(max_age_days, age_days)
+            last_sale = last_sale_by_store_sku.get((store_id, sku))
+            days_since_sale = (as_of - last_sale).days if last_sale else None
+            last_week = latest_week_exposure.get((store_id, sku))
+            exposed_last_week = bool(last_week and last_week[1] > 0)
+            seasonal_window = any(
+                as_of - timedelta(days=6) <= event <= as_of
+                for event in calendar_events[str(field(store, "state", default="")).casefold()]
+            )
+            no_sale_for_seven_days = (
+                projected > 0 and exposed_last_week
+                and (last_sale is None or days_since_sale >= 7)
+            )
+            design_exposure = successor_exposure_days[store_id, sku]
+            no_sale_after_design = (
+                projected > 0 and design_launch is not None and design_exposure > 0
+                and sales_since_successor_by_store_sku[store_id, sku] == 0
+            )
+            if seasonal_window and no_sale_for_seven_days:
+                stock_risk = "seasonal_7_day_no_sale"
+                stock_risk_reason = (
+                    "No recorded sale for at least 7 days during a calendar-marked "
+                    "festival or wedding window, with recent stock exposure."
+                )
+            elif no_sale_after_design:
+                stock_risk = "no_sales_after_new_design"
+                stock_risk_reason = (
+                    f"No recorded sales across {design_exposure} in-stock days since "
+                    f"a newer design launched on {design_launch.isoformat()}."
+                )
+            else:
+                stock_risk = None
+                stock_risk_reason = None
             store_stock_units += projected
+            store_recent_price = (
+                recent_revenue_by_store_sku[store_id, sku]
+                / recent_units_by_store_sku[store_id, sku]
+                if recent_units_by_store_sku[store_id, sku] else None
+            )
             store_performance.append({
                 "store_id": store_id,
                 "city": field(store, "city", default=""),
@@ -244,6 +454,8 @@ def _build_analytics(tables: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
                 "sales_revenue": round(revenue_by_store_sku[store_id, sku], 2),
                 "recent_units": recent_sold,
                 "recent_revenue": round(recent_revenue_by_store_sku[store_id, sku], 2),
+                "average_selling_price": round(store_recent_price, 2)
+                if store_recent_price is not None else None,
                 "recent_in_stock_days": days_in_stock,
                 "recent_velocity": round(rate, 3) if rate is not None else None,
                 "on_hand": on_hand,
@@ -251,6 +463,13 @@ def _build_analytics(tables: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
                 "stock_units": projected,
                 "cover_days": round(projected / rate, 1) if rate and rate > 0 else None,
                 "stock_age_days": age_days,
+                "last_sale_date": last_sale.isoformat() if last_sale else None,
+                "days_since_sale": days_since_sale,
+                "successor_launch_date": design_launch.isoformat() if design_launch else None,
+                "exposure_days_since_successor": design_exposure,
+                "seasonal_window_active": seasonal_window,
+                "stock_risk": stock_risk,
+                "stock_risk_reason": stock_risk_reason,
                 "unsold_with_exposure": projected > 0 and recent_sold == 0 and days_in_stock > 0,
             })
         warehouse = snapshot[WAREHOUSE, sku]
@@ -270,6 +489,12 @@ def _build_analytics(tables: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
             "sales_revenue": round(revenue_by_sku[sku], 2),
             "recent_sold_units": recent_units_by_sku[sku],
             "recent_revenue": round(recent_revenue_by_sku[sku], 2),
+            "average_selling_price": round(margin_price, 2) if margin_price is not None else None,
+            "unit_gross_margin_estimate": round(unit_margin, 2)
+            if unit_margin is not None else None,
+            "gross_margin_pct_estimate": round(100 * unit_margin / margin_price, 2)
+            if unit_margin is not None and margin_price else None,
+            "margin_basis": margin_basis,
             "recent_velocity": round(recent_units_by_sku[sku] / recent_exposure_days, 3)
             if recent_exposure_days else None,
             "store_stock_units": store_stock_units,
@@ -280,6 +505,10 @@ def _build_analytics(tables: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
             "best_selling_store": best_historical["store_id"] if best_historical else None,
             "best_recent_store": best_recent["store_id"] if best_recent else None,
             "unsold_locations": unsold_locations,
+            "stock_risk_locations": [
+                row for row in store_performance if row["stock_risk"]
+            ],
+            "successor_launch_date": design_launch.isoformat() if design_launch else None,
             "store_performance": store_performance,
         }
 
@@ -342,16 +571,50 @@ def _run_analysis_tables(tables: dict[str, list[dict[str, Any]]],
     enriched = []
     for move in optimized:
         item = item_by_sku.get(move["sku_id"], {})
+        product = analytics["products"].get(move["sku_id"], {})
         move = dict(move)
+        mrp = as_number(field(item, "mrp"))
+        raw_cost_price = field(item, "cost_price", default=None)
+        cost_price = as_number(raw_cost_price)
+        average_price = product.get("average_selling_price")
+        if average_price is None:
+            average_price = mrp
+        unit_margin = (
+            average_price - cost_price
+            if average_price is not None and raw_cost_price not in (None, "") else None
+        )
+        margin_pct = 100 * unit_margin / average_price if unit_margin is not None and average_price else None
+        arrival = as_date(move.get("arrival_date"))
+        lead_days = max(0, (arrival - as_date(analytics["as_of"])).days) if arrival else 0
+        selling_days = max(0, 14 - lead_days)
+        expected_units = min(
+            int(move.get("qty", 0)),
+            max(0.0, as_number(move.get("daily_velocity"))) * selling_days,
+        )
         move.update({
             "style_name": str(field(item, "style_name", default=move["style_id"])),
             "size": str(field(item, "size", default="")),
             "description": _product_description(item),
-            "mrp": as_number(field(item, "mrp")),
-            "cost_price": as_number(field(item, "cost_price")),
-            "move_value_mrp": round(move["qty"] * as_number(field(item, "mrp")), 2),
+            "mrp": mrp,
+            "cost_price": cost_price,
+            "move_value_mrp": round(move["qty"] * mrp, 2),
+            "estimated_unit_gross_margin": round(unit_margin, 2)
+            if unit_margin is not None else None,
+            "estimated_gross_margin_pct": round(margin_pct, 2)
+            if margin_pct is not None else None,
+            "estimated_sell_through_units_14d": round(expected_units, 2),
+            "estimated_gross_profit_14d": round(unit_margin * expected_units, 2)
+            if unit_margin is not None else None,
+            "estimated_gross_profit_if_all_units_sell": round(unit_margin * move["qty"], 2)
+            if unit_margin is not None else None,
+            "margin_basis": product.get("margin_basis", "MRP estimate; no realized selling price recorded")
+            + ("; cost price not supplied, margin unavailable" if raw_cost_price in (None, "") else ""),
+            "profit_estimate_note": (
+                "Directional gross-margin estimate before tax and overhead; uses the product's "
+                "observed selling price when available, otherwise MRP."
+            ),
             "approval_threshold_mrp": approval_limit,
-            "requires_human_approval": move["qty"] * as_number(field(item, "mrp")) > approval_limit,
+            "requires_human_approval": move["qty"] * mrp > approval_limit,
         })
         encoded = "|".join(str(move.get(column, "")) for column in (
             "move_type", "from_location", "to_location", "sku_id", "qty", "arrival_date"))
@@ -411,13 +674,36 @@ def _scoped_product(product: dict[str, Any], store_ids: set[str]) -> dict[str, A
     historical = max(metrics, key=lambda row: row["sales_units"], default=None)
     recent = max(metrics, key=lambda row: row["recent_units"], default=None)
     store_stock = sum(row["stock_units"] for row in metrics)
+    historical_units = sum(row["sales_units"] for row in metrics)
+    historical_revenue = sum(row["sales_revenue"] for row in metrics)
+    recent_revenue = sum(row["recent_revenue"] for row in metrics)
+    selling_price = (
+        recent_revenue / recent_units if recent_units
+        else historical_revenue / historical_units if historical_units
+        else as_number(product.get("mrp"))
+    )
+    has_cost_price = product.get("cost_price") not in (None, "")
+    unit_margin = (
+        selling_price - as_number(product.get("cost_price"))
+        if selling_price is not None and has_cost_price else None
+    )
     warehouse_units = product["warehouse_units"]
     return {
         **product,
-        "total_sold_units": sum(row["sales_units"] for row in metrics),
-        "sales_revenue": round(sum(row["sales_revenue"] for row in metrics), 2),
+        "total_sold_units": historical_units,
+        "sales_revenue": round(historical_revenue, 2),
         "recent_sold_units": recent_units,
-        "recent_revenue": round(sum(row["recent_revenue"] for row in metrics), 2),
+        "recent_revenue": round(recent_revenue, 2),
+        "average_selling_price": round(selling_price, 2) if selling_price is not None else None,
+        "unit_gross_margin_estimate": round(unit_margin, 2)
+        if unit_margin is not None else None,
+        "gross_margin_pct_estimate": round(100 * unit_margin / selling_price, 2)
+        if unit_margin is not None and selling_price else None,
+        "margin_basis": (
+            "recent realized selling price (post-discount)" if recent_units
+            else "all-time realized selling price (post-discount)" if historical_units
+            else "MRP estimate; no realized selling price recorded"
+        ) + ("; cost price not supplied, margin unavailable" if not has_cost_price else ""),
         "recent_velocity": round(recent_units / exposure_days, 3) if exposure_days else None,
         "store_stock_units": store_stock,
         "network_stock_units": store_stock + warehouse_units,
@@ -430,6 +716,64 @@ def _scoped_product(product: dict[str, Any], store_ids: set[str]) -> dict[str, A
         "unsold_locations": [row for row in metrics if row["unsold_with_exposure"]],
         "store_performance": metrics,
     }
+
+
+def _similar_products(product: dict[str, Any], exclude_store_id: str | None = None,
+                      allowed_store_ids: set[str] | None = None
+                      ) -> list[dict[str, Any]]:
+    category = str(product.get("category", "")).casefold()
+    size = str(product.get("size", "")).casefold()
+    price = as_number(product.get("mrp"))
+    style_id = str(product.get("style_id", ""))
+    if not category or not size or not price or as_number(product.get("is_packaging")):
+        return []
+
+    matches = []
+    for candidate in state["products"].values():
+        candidate_price = as_number(candidate.get("mrp"))
+        candidate_stores = [
+            row for row in candidate["store_performance"]
+            if allowed_store_ids is None or row["store_id"] in allowed_store_ids
+        ]
+        recent_units = sum(row["recent_units"] for row in candidate_stores)
+        if (
+            candidate["sku_id"] == product.get("sku_id")
+            or str(candidate.get("style_id", "")) == style_id
+            or str(candidate.get("category", "")).casefold() != category
+            or str(candidate.get("size", "")).casefold() != size
+            or as_number(candidate.get("is_packaging"))
+            or not candidate_price
+            or recent_units <= 0
+        ):
+            continue
+        price_difference = abs(candidate_price - price) / price
+        if price_difference > 0.3 or candidate["recent_sold_units"] <= 0:
+            continue
+        demand = [
+            row for row in candidate_stores
+            if row["store_id"] != exclude_store_id and row["recent_units"] > 0
+        ]
+        best_demand = max(demand, key=lambda row: row["recent_units"], default=None)
+        matches.append({
+            "sku_id": candidate["sku_id"],
+            "style_id": candidate.get("style_id"),
+            "style_name": candidate.get("style_name"),
+            "category": candidate.get("category"),
+            "size": candidate.get("size"),
+            "mrp": candidate_price,
+            "price_difference_pct": round(price_difference * 100, 1),
+            "recent_sold_units": recent_units,
+            "demand_store": best_demand["store_id"] if best_demand else None,
+            "demand_store_recent_units": best_demand["recent_units"] if best_demand else 0,
+            "recent_velocity": candidate["recent_velocity"],
+            "similarity_basis": "same category and size; MRP within 30%",
+            "material_match_available": False,
+        })
+    matches.sort(key=lambda row: (
+        -row["demand_store_recent_units"], -row["recent_sold_units"],
+        row["price_difference_pct"], row["sku_id"],
+    ))
+    return matches[:5]
 
 
 def _date_range(tables: dict[str, list[dict[str, Any]]]) -> tuple[date | None, date | None]:
@@ -510,6 +854,7 @@ def _store_summaries(tables: dict[str, list[dict[str, Any]]],
     sold_units = defaultdict(float)
     footfall = defaultdict(float)
     recent_bill_count = defaultdict(int)
+    total_bill_count = defaultdict(int)
     present_shifts = defaultdict(int)
     roster_days = defaultdict(set)
     bill_store = {str(field(row, "bill_id", default="")): str(field(row, "store_id", default=""))
@@ -522,6 +867,7 @@ def _store_summaries(tables: dict[str, list[dict[str, Any]]],
     for bill in tables["bills"]:
         bill_date = as_date(field(bill, "bill_date", "date"))
         store_id = str(field(bill, "store_id", default=""))
+        total_bill_count[store_id] += 1
         if bill_date and footfall_start and footfall_start <= bill_date <= footfall_end:
             recent_bill_count[store_id] += 1
     for row in tables.get("roster_daily", []):
@@ -556,6 +902,9 @@ def _store_summaries(tables: dict[str, list[dict[str, Any]]],
             "capacity_pct": round(100 * units / capacity, 1) if capacity else 0,
             "sales_revenue": round(sales[store_id], 2),
             "units_sold": int(sold_units[store_id]),
+            "bill_count": total_bill_count[store_id],
+            "average_bill_value": round(sales[store_id] / total_bill_count[store_id], 2)
+            if total_bill_count[store_id] else 0,
             "footfall": int(footfall[store_id]),
             "recent_bills": recent_bill_count[store_id],
             "visit_to_bill_pct": round(100 * recent_bill_count[store_id] / footfall[store_id], 2)
@@ -810,7 +1159,7 @@ def decide(
         "move_snapshot": dict(move) if decision.status == "approved" else None,
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
-    _write_decisions()
+    _write_decisions(move_id, f"decision_{decision.status}")
     move["decision"] = decision.status
     move["decision_note"] = decision.note
     move["decision_actor"] = actor or "Merchandising team"
@@ -862,7 +1211,7 @@ def complete_logistics(
         "completed_at": completed_at,
     }
     approval["updated_at"] = completed_at
-    _write_decisions()
+    _write_decisions(move_id, "logistics_completed")
     move["completion"] = approval["completion"]
     move["logistics_status"] = "completed"
     return {"ok": True, "item": move}
@@ -984,6 +1333,11 @@ def product_detail(
         "sales_trend": [{"week": week, "units": sales.get(week, 0)} for week in weeks],
         "stock_trend": [{"week": week, "units": stock.get(week, 0)} for week in weeks],
         "transfer_recommendations": transfer_moves,
+        "similar_products": _similar_products(product, allowed_store_ids=managed),
+        "similarity_notice": (
+            "Matches use category, size, and a 30% MRP band. Fabric/material fields are not "
+            "present in the supplied catalogue, so no material match is claimed."
+        ),
     }
 
 
@@ -1013,6 +1367,13 @@ def store_detail(
         key=lambda row: (-int(row["store_metrics"]["stock_age_days"] or 0),
                          -row["store_metrics"]["stock_units"]),
     )[:20]
+    stock_risk = sorted(
+        (row for row in performance if row["store_metrics"]["stock_risk"]),
+        key=lambda row: (-(row["store_metrics"]["days_since_sale"] or 0),
+                         -row["store_metrics"]["stock_units"]),
+    )
+    for product in stock_risk:
+        product["similar_demand"] = _similar_products(product, exclude_store_id=store_id)
     weeks = state["weeks"]
     sales = state["store_sales_weekly"].get(store_id, {})
     stock = state["store_stock_weekly"].get(store_id, {})
@@ -1025,12 +1386,19 @@ def store_detail(
         category_stock[str(field(item, "category", default="Other"))] += int(
             as_number(field(row, "on_hand")) + as_number(field(row, "in_transit"))
         )
+    store_bills = [
+        row for row in state["bill_summaries"]
+        if row["store_id"] == store_id and row["bill_date"] >= state["recent_start"]
+    ]
+    store_bills.sort(key=lambda row: (row["bill_date"], row["bill_id"]), reverse=True)
     return {
         "store": summaries[store_id],
         "category_stock": [{"category": key, "units": value}
                            for key, value in sorted(category_stock.items())],
         "best_sellers": best_sellers,
         "dormant_stock": dormant,
+        "stock_risk": stock_risk[:20],
+        "recent_bills": store_bills[:15],
         "weekly_trend": [{
             "week": week, "sales_units": sales.get(week, 0), "stock_units": stock.get(week, 0),
         } for week in weeks],

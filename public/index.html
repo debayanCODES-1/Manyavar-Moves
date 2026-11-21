@@ -124,7 +124,7 @@
         <section class="view" id="stores-view">
           <div class="page-title-row"><div><span class="eyebrow muted-eyebrow">20 STORES · ONE CONNECTED NETWORK</span><h1>Each store, in its element<span class="heading-period">.</span></h1><p>See stock, capacity and sales together to spot where the network can work harder.</p></div></div>
           <div class="store-summary-strip" id="store-summary-strip"></div>
-          <div class="table-wrap"><table class="data-table"><thead><tr><th>STORE</th><th>GRADE</th><th>AREA MANAGER</th><th>NETWORK STOCK</th><th>CAPACITY</th><th>SALES VALUE</th><th>UNITS SOLD</th><th>FOOTFALL · 6 MO</th><th>VISIT → BILL</th><th>AVG STAFF PRESENT</th></tr></thead><tbody id="store-table"><tr><td colspan="10" class="empty-cell">Upload your dataset to see store-level performance.</td></tr></tbody></table></div>
+          <div class="table-wrap"><table class="data-table"><thead><tr><th>STORE</th><th>GRADE</th><th>AREA MANAGER</th><th>NETWORK STOCK</th><th>CAPACITY</th><th>SALES VALUE</th><th>UNITS SOLD</th><th>BILLS · ALL DATA</th><th>FOOTFALL · 6 MO</th><th>VISIT → BILL</th><th>AVG STAFF PRESENT</th></tr></thead><tbody id="store-table"><tr><td colspan="11" class="empty-cell">Upload your dataset to see store-level performance.</td></tr></tbody></table></div>
           <section class="panel detail-panel" id="store-detail"><div class="empty-note">Choose a store to explore its weekly sales, stock position, best sellers and dormant inventory.</div></section>
         </section>
 
@@ -192,6 +192,7 @@
         <span class="eyebrow muted-eyebrow">MERCHANDISING ACCESS</span>
         <h2 id="auth-title">Choose your demo workspace.</h2>
         <p id="auth-description">Sign in as a merchandising role. Demo sessions are permission-aware and expire after eight hours.</p>
+        <div id="role-auth-controls">
         <label for="demo-role">Workspace role</label>
         <select id="demo-role">
           <option value="admin">Admin · full demo access</option>
@@ -206,12 +207,27 @@
         <label id="token-label" for="auth-token" hidden>Team access token</label>
         <input id="auth-token" type="password" autocomplete="current-password" placeholder="Only needed when configured by your team" hidden>
         <button class="button button-rust" type="submit">Enter workspace <span>→</span></button>
+        </div>
+        <section id="face-demo-panel" class="face-demo-panel" hidden>
+          <span class="eyebrow muted-eyebrow">LOCAL DEMO CHECK · NOT PRODUCTION AUTH</span>
+          <p>With your consent, this tab captures a temporary face template and compares it locally. Images never leave this browser. The first face enrolls this demo tab; this does not prove identity or secure the role.</p>
+          <label class="face-consent"><input id="face-consent" type="checkbox"> I consent to the local demo face check.</label>
+          <video id="face-video" autoplay muted playsinline hidden aria-label="Local face matching camera preview"></video>
+          <div id="face-status" class="face-status" role="status" aria-live="polite">Start the camera check when ready.</div>
+          <div class="face-actions">
+            <button id="face-start" class="button button-rust" type="button">Start local check</button>
+            <button id="face-skip" class="button button-quiet" type="button">Continue without a face match</button>
+            <button id="face-clear" class="button button-quiet" type="button">Clear this tab’s template</button>
+            <button id="face-sign-out" class="button button-quiet" type="button">Sign out</button>
+          </div>
+        </section>
       </form>
     </dialog>
     <div class="app-loader" id="app-loader" role="status" aria-live="polite">
       <div class="loader-orbit"><span></span><i></i></div><strong>Setting the stockroom.</strong><span>Connecting sales, inventory and store rules…</span>
     </div>
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
+    <script src="/vendor/face-api.js"></script>
     <script type="module" src="/app.js"></script>
   </body>
 </html>
