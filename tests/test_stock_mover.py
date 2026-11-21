@@ -73,6 +73,51 @@ class StockMoverTests(unittest.TestCase):
         transfer = next(m for m in moves if m["move_type"] == "STORE_TO_STORE")
         self.assertEqual(transfer["qty"], 7)
         self.assertGreaterEqual(transfer["donor_cover_after_days"], 30)
+        self.assertIn("sell_probability_pct", transfer)
+        self.assertGreater(transfer["sell_probability_pct"], 0)
+        self.assertGreater(transfer["store_affinity_score"], 0)
+        self.assertIn("Store fit:", transfer["reason"])
+        checks = {check["rule"]: check for check in transfer["validation_checks"]}
+        self.assertEqual(checks["Store capacity"]["status"], "pass")
+        self.assertEqual(checks["Minimum display"]["status"], "pass")
+        self.assertEqual(checks["S++ style protection"]["status"], "pass")
+        self.assertEqual(checks["Donor cover"]["status"], "pass")
+        self.assertEqual(checks["Route lead time"]["status"], "pass")
+
+    def test_stale_stock_moves_to_store_with_matching_size_and_material_demand(self):
+        data = fixture(receiver_stock=0, donor_stock=100)
+        data["items"][0].update({"size": "M", "material": "Cotton Silk"})
+        data["bills"] = []
+        data["bill_lines"] = []
+        data["stock_weekly"] = [
+            {"store_id": "REC", "sku_id": "KUR-01-M", "days_in_stock": 0},
+            {"store_id": "DON", "sku_id": "KUR-01-M", "days_in_stock": 90},
+            {"store_id": "REC", "sku_id": "KUR-02-M", "days_in_stock": 90},
+        ]
+        data["items"].append({
+            "sku_id": "KUR-02-M", "style_id": "KUR-02", "category": "Kurta Set",
+            "size": "M", "material": "Cotton Silk", "is_packaging": 0,
+        })
+        data["bills"].append({
+            "bill_id": "B-REC-PEER", "bill_date": "2026-10-15", "store_id": "REC",
+        })
+        data["bill_lines"].append({
+            "bill_id": "B-REC-PEER", "sku_id": "KUR-02-M", "qty": 20,
+        })
+        data["stock_snapshot"][1]["oldest_stock_received_on"] = (
+            AS_OF - timedelta(days=150)).isoformat()
+
+        moves = build_recommendations(data)
+        transfer = next(move for move in moves if move["move_type"] == "STORE_TO_STORE")
+        self.assertEqual(transfer["from_location"], "DON")
+        self.assertEqual(transfer["to_location"], "REC")
+        self.assertGreater(transfer["daily_velocity"], 0)
+        self.assertIn("matching material/cloth", transfer["demand_basis"])
+        self.assertIn("70+ day no-demand stock", transfer["reason"])
+        self.assertEqual(transfer["donor_cover_after_days"], "")
+        self.assertTrue(transfer["stale_no_demand_redeployment"])
+        checks = {check["rule"]: check for check in transfer["validation_checks"]}
+        self.assertEqual(checks["Donor cover"]["status"], "evidence")
 
     def test_flagship_protected_style_is_never_transferred_out(self):
         moves = build_recommendations(fixture(protected=True))
@@ -82,6 +127,26 @@ class StockMoverTests(unittest.TestCase):
         moves = build_recommendations(fixture(receiver_capacity=5))
         transfer = next(m for m in moves if m["move_type"] == "STORE_TO_STORE")
         self.assertEqual(transfer["qty"], 5)
+        self.assertEqual(transfer["target_capacity_remaining_units"], 5)
+
+    def test_capacity_remaining_counts_all_other_skus_at_destination(self):
+        data = fixture(receiver_capacity=10)
+        data["items"].append({
+            "sku_id": "JKT-01-M", "style_id": "JKT-01", "category": "Jacket",
+            "is_packaging": 0,
+        })
+        data["min_display"].extend([
+            {"tier": "A", "category": "Jacket", "min_display_units": 0},
+            {"tier": "S++", "category": "Jacket", "min_display_units": 0},
+        ])
+        data["stock_snapshot"].append({
+            "as_of_date": "2026-10-31", "location_id": "REC", "sku_id": "JKT-01-M",
+            "on_hand": 7, "in_transit": 0,
+        })
+        moves = build_recommendations(data)
+        transfer = next(move for move in moves if move["move_type"] == "STORE_TO_STORE")
+        self.assertEqual(transfer["qty"], 3)
+        self.assertEqual(transfer["target_capacity_remaining_units"], 3)
 
     def test_old_stock_is_pulled_back_but_minimum_display_remains(self):
         data = fixture(receiver_stock=0, donor_stock=30)

@@ -51,6 +51,22 @@ def api_fixture():
 
 
 class APIUploadTests(unittest.TestCase):
+    def test_api_shared_secret_protects_backend_routes_but_not_health(self):
+        previous = dict(api.state)
+        try:
+            with patch.object(api, "API_SHARED_SECRET", "gateway-test-secret"), \
+                    TestClient(api.app) as client:
+                self.assertEqual(client.get("/health").status_code, 200)
+                self.assertEqual(client.get("/api/summary").status_code, 401)
+                response = client.get(
+                    "/api/summary",
+                    headers={"x-stockmover-api-secret": "gateway-test-secret"},
+                )
+                self.assertEqual(response.status_code, 200)
+        finally:
+            api.state.clear()
+            api.state.update(previous)
+
     def test_zero_sales_without_recent_stock_exposure_is_unknown_not_dormant(self):
         source = api_fixture()
         source["bills"] = []
@@ -62,7 +78,18 @@ class APIUploadTests(unittest.TestCase):
         store = next(row for row in analytics["products"]["KUR-01-M"]["store_performance"]
                      if row["store_id"] == "REC")
         self.assertIsNone(store["recent_velocity"])
+        self.assertEqual(store["sell_through_grade"], "UNKNOWN")
         self.assertFalse(store["unsold_with_exposure"])
+
+    def test_store_sell_grade_compares_velocity_only_after_recorded_exposure(self):
+        analytics = api._build_analytics(api_fixture())
+        metrics = {
+            row["store_id"]: row
+            for row in analytics["products"]["KUR-01-M"]["store_performance"]
+        }
+        self.assertGreater(metrics["DON"]["recent_velocity"], metrics["REC"]["recent_velocity"])
+        self.assertEqual(metrics["DON"]["sell_through_grade"], "A")
+        self.assertEqual(metrics["REC"]["sell_through_grade"], "C")
 
     def test_festival_stock_risk_requires_seven_days_without_sales_and_exposure(self):
         source = api_fixture()
@@ -85,6 +112,20 @@ class APIUploadTests(unittest.TestCase):
         store = next(row for row in analytics["products"]["KUR-01-M"]["store_performance"]
                      if row["store_id"] == "REC")
         self.assertIsNone(store["stock_risk"])
+
+    def test_dead_stock_requires_70_days_and_recent_stock_exposure(self):
+        source = api_fixture()
+        source["bills"] = []
+        source["bill_lines"] = []
+        for row in source["stock_snapshot"]:
+            if row["location_id"] == "REC" and row["sku_id"] == "KUR-01-M":
+                row["on_hand"] = 5
+                row["oldest_stock_received_on"] = "2026-07-01"
+        analytics = api._build_analytics(source)
+        store = next(row for row in analytics["products"]["KUR-01-M"]["store_performance"]
+                     if row["store_id"] == "REC")
+        self.assertEqual(store["stock_risk"], "dead_stock_70_day_no_sale")
+        self.assertEqual(store["sell_through_grade"], "WATCH")
 
     def test_normal_season_signal_uses_exposure_after_a_newer_design_launch(self):
         source = api_fixture()
@@ -178,6 +219,54 @@ class APIUploadTests(unittest.TestCase):
                     moves = client.get("/api/recommendations?decision=pending").json()["items"]
                     self.assertTrue(moves)
                     self.assertEqual(moves[0]["from_location"], "WH-KOL")
+                    stores = client.get("/api/stores").json()["items"]
+                    lucknow = next(row for row in stores if row["store_id"] == "LKO-01")
+                    self.assertIn("Lucknow", lucknow["address"])
+                    self.assertIn(lucknow["sell_through_grade"], {"A", "B", "C", "WATCH", "UNKNOWN"})
+                    self.assertNotEqual(lucknow["sell_through_grade"], lucknow["tier"])
+                    expected_store_stock = sum(
+                        row["on_hand"] + row["in_transit"]
+                        for row in api.state["tables"]["stock_snapshot"]
+                        if row["location_id"] == "LKO-01"
+                    )
+                    self.assertEqual(lucknow["stock_units"], expected_store_stock)
+                    self.assertTrue(lucknow["store_locator_url"])
+                    self.assertTrue(moves[0]["to_store_address"])
+                    self.assertTrue(moves[0]["to_store_maps_url"])
+                    all_moves = client.get("/api/recommendations?limit=100").json()["items"]
+                    store_transfer = next(
+                        move for move in all_moves
+                        if move["move_type"] == "STORE_TO_STORE"
+                        and move["from_location"] == "GAY-02"
+                        and move["to_location"] == "GAY-01"
+                    )
+                    self.assertGreater(store_transfer["sell_probability_pct"], 0)
+                    self.assertIn("Bazaza Road", store_transfer["from_store_address"])
+                    self.assertIn("G.B. Road", store_transfer["to_store_address"])
+                    self.assertTrue(store_transfer["route_maps_url"])
+                    focused_product = client.get(
+                        f"/api/products/{store_transfer['sku_id']}?store_id=GAY-02"
+                    ).json()
+                    self.assertEqual(
+                        focused_product["placement_suggestion"]["source_location"], "GAY-02",
+                    )
+                    self.assertEqual(
+                        focused_product["placement_suggestion"]["destination_location"], "GAY-01",
+                    )
+                    products = client.get("/api/products?limit=500").json()["items"]
+                    self.assertEqual(len(products), 385)
+                    for product in products:
+                        self.assertIn(product["sell_through_grade"], {
+                            "A", "B", "C", "WATCH", "UNKNOWN", "N/A",
+                        })
+                        suggestion = product["placement_suggestion"]
+                        self.assertIn(suggestion["status"], {
+                            "ready_for_review", "placement_lead", "monitor", "not_applicable",
+                        })
+                        if suggestion.get("destination_location"):
+                            self.assertIn(suggestion["destination_location"], {
+                                store["store_id"] for store in stores
+                            })
             finally:
                 api.state.clear()
                 api.state.update(previous)
@@ -339,6 +428,14 @@ class APIUploadTests(unittest.TestCase):
         self.assertEqual(len(tables["items"]), 385)
         self.assertEqual(len(tables["salespeople"]), 100)
         self.assertGreater(len(tables["stock_weekly"]), 10_000)
+        self.assertTrue(all(
+            row["store_name"]
+            and row["address"]
+            and row["location_source"] == "Manyavar official store locator"
+            and row["store_locator_url"].startswith("https://www.manyavar.com/")
+            and row["google_maps_url"].startswith("https://www.google.com/maps/dir/")
+            for row in tables["stores"]
+        ))
 
 
 if __name__ == "__main__":

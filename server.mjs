@@ -8,11 +8,38 @@ const ROOT = fileURLToPath(new URL(".", import.meta.url));
 const PUBLIC_DIR = resolve(ROOT, "public");
 loadLocalEnv();
 const BACKEND = new URL(process.env.FASTAPI_URL || "http://127.0.0.1:8000");
+const PUBLIC_API_BASE_URL = (process.env.PUBLIC_API_BASE_URL || "/").replace(/\/+$/, "") || "";
 const PORT = Number(process.env.PORT || 3000);
 const MAX_UPLOAD = 210 * 1024 * 1024;
+const NODE_ENV = process.env.NODE_ENV || "development";
 const DEMO_MODE = process.env.DEMO_MODE !== "false";
 const APPROVAL_TOKEN = process.env.APPROVAL_TOKEN || "";
 const SESSION_SECRET = process.env.APP_SESSION_SECRET || APPROVAL_TOKEN || randomBytes(32).toString("hex");
+const API_SHARED_SECRET = process.env.API_SHARED_SECRET || "";
+const FRONTEND_ORIGINS = (process.env.FRONTEND_ORIGINS || "")
+  .split(",").map((origin) => origin.trim()).filter(Boolean);
+if (NODE_ENV === "production") {
+  const missing = [
+    !APPROVAL_TOKEN && "APPROVAL_TOKEN",
+    !process.env.APP_SESSION_SECRET && "APP_SESSION_SECRET",
+    !API_SHARED_SECRET && "API_SHARED_SECRET",
+    !FRONTEND_ORIGINS.length && "FRONTEND_ORIGINS",
+  ].filter(Boolean);
+  if (missing.length) {
+    throw new Error(`Missing production environment variable(s): ${missing.join(", ")}.`);
+  }
+  for (const origin of FRONTEND_ORIGINS) {
+    let parsed;
+    try {
+      parsed = new URL(origin);
+    } catch {
+      throw new Error(`FRONTEND_ORIGINS contains an invalid origin: ${origin}.`);
+    }
+    if (parsed.protocol !== "https:" || parsed.origin !== origin) {
+      throw new Error(`FRONTEND_ORIGINS must contain exact HTTPS origins without a trailing slash: ${origin}.`);
+    }
+  }
+}
 const DEMO_ROLES = {
   admin: { name: "Demo Admin", permissions: ["read", "upload", "run", "approve", "ask"] },
   stock_manager: { name: "Stock Manager", permissions: ["read", "upload", "run", "approve", "ask"] },
@@ -32,6 +59,27 @@ const MIME = {
 
 function proxy(req, res) {
   const url = new URL(req.url, `http://${req.headers.host || "localhost"}`);
+  const isApiRequest = url.pathname.startsWith("/api/");
+  if (isApiRequest && req.method === "OPTIONS") {
+    if (!applyApiCors(req, res)) {
+      sendJson(res, 403, { detail: "This browser origin is not allowed." });
+      return;
+    }
+    res.writeHead(204);
+    res.end();
+    return;
+  }
+  if (isApiRequest) applyApiCors(req, res);
+  if (url.pathname === "/runtime-config.js" && req.method === "GET") {
+    res.writeHead(200, {
+      "content-type": "text/javascript; charset=utf-8",
+      "cache-control": "no-store",
+    });
+    res.end(`window.__MANYAVAR_CONFIG__=${JSON.stringify({
+      apiBaseUrl: PUBLIC_API_BASE_URL,
+    })};`);
+    return;
+  }
   if (url.pathname === "/api/auth/status" && req.method === "GET") {
     const user = getSession(req);
     sendJson(res, 200, {
@@ -94,6 +142,7 @@ function proxy(req, res) {
         "x-stockmover-role": user.role,
         ...(user.area_manager_id ? { "x-stockmover-area-manager": user.area_manager_id } : {}),
       } : {}),
+      ...(API_SHARED_SECRET ? { "x-stockmover-api-secret": API_SHARED_SECRET } : {}),
     },
   }, (upstream) => {
     res.writeHead(upstream.statusCode || 502, {
@@ -114,6 +163,20 @@ function proxy(req, res) {
   req.pipe(outgoing);
 }
 
+function originAllowed(origin) {
+  return Boolean(origin && FRONTEND_ORIGINS.includes(origin));
+}
+
+function applyApiCors(req, res) {
+  const origin = req.headers.origin;
+  if (!originAllowed(origin)) return false;
+  res.setHeader("Access-Control-Allow-Origin", origin);
+  res.setHeader("Access-Control-Allow-Methods", "GET, HEAD, POST, PATCH, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  res.setHeader("Vary", "Origin");
+  return true;
+}
+
 function sendJson(res, status, value, headers = {}) {
   res.writeHead(status, { "content-type": "application/json", "cache-control": "no-store", ...headers });
   res.end(JSON.stringify(value));
@@ -127,7 +190,9 @@ function cookies(req) {
 }
 
 function getSession(req) {
-  const value = cookies(req).stock_mover_session || "";
+  const authorization = req.headers.authorization || "";
+  const bearer = authorization.startsWith("Bearer ") ? authorization.slice(7) : "";
+  const value = cookies(req).stock_mover_session || bearer;
   const [payload, signature] = value.split(".");
   if (!payload || !signature) return null;
   const expected = createHmac("sha256", SESSION_SECRET).update(payload).digest("base64url");
@@ -176,12 +241,16 @@ function issueSession(req, res, role, name, areaManagerId = null) {
     name, role, area_manager_id: areaManagerId, expires: Date.now() + 8 * 60 * 60 * 1000,
   })).toString("base64url");
   const signature = createHmac("sha256", SESSION_SECRET).update(payload).digest("base64url");
-  const secure = req.headers["x-forwarded-proto"] === "https" ? "; Secure" : "";
+  const sessionToken = `${payload}.${signature}`;
+  const secure = req.headers["x-forwarded-proto"] === "https"
+    || req.headers.origin?.startsWith("https://") ? "; Secure" : "";
+  const sameSite = originAllowed(req.headers.origin) ? "None" : "Strict";
   sendJson(res, 200, {
     ok: true,
     user: { name, role, area_manager_id: areaManagerId, permissions: DEMO_ROLES[role].permissions },
+    sessionToken,
   }, {
-    "set-cookie": `stock_mover_session=${payload}.${signature}; HttpOnly; SameSite=Strict; Path=/; Max-Age=28800${secure}`,
+    "set-cookie": `stock_mover_session=${payload}.${signature}; HttpOnly; SameSite=${sameSite}; Path=/; Max-Age=28800${secure}`,
   });
 }
 
@@ -234,6 +303,16 @@ function tokenLogin(req, res) {
 createServer((req, res) => {
   if (req.url === "/api" || req.url.startsWith("/api/")) {
     proxy(req, res);
+    return;
+  }
+  if (req.url === "/runtime-config.js" && req.method === "GET") {
+    res.writeHead(200, {
+      "content-type": "text/javascript; charset=utf-8",
+      "cache-control": "no-store",
+    });
+    res.end(`window.__MANYAVAR_CONFIG__=${JSON.stringify({
+      apiBaseUrl: PUBLIC_API_BASE_URL,
+    })};`);
     return;
   }
   if (req.url === "/health") {

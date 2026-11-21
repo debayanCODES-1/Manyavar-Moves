@@ -6,10 +6,10 @@ decision service, a LightGBM demand forecast, constrained move selection,
 deterministic rule validation, SQLite-backed workflow/audit history, and an optional Gemini
 merchandising copilot.
 
-The UI pairs Manyavar's ivory and maroon identity with jade, indigo, and amber
-data accents, glass panels, editorial stock photography, and loading states.
-The images are illustrative stock photography, not product-specific catalogue
-images. On a clean install the backend generates a clearly labeled synthetic
+The UI uses Manyavar-inspired maroon, red, ivory, and marigold with glass
+panels, grouped navigation, larger readable type, editorial stock photography,
+and loading states. Images are illustrative stock photography, not
+product-specific catalogue images. On a clean install the backend generates a clearly labeled synthetic
 demo dataset and calculates its forecasts and recommendations; upload the
 shared workbook or CSV bundle to replace it with provided data.
 
@@ -54,6 +54,76 @@ tables are `stores`, `area_managers`, `items`, `bills`, `bill_lines`,
 enrich store analytics and calendar features improve the learned forecast.
 The upload is validated before its recommendations replace the current dataset.
 
+The demo's 20 store IDs are synthetic. Their display names, street addresses,
+and location links point to publicly listed Manyavar outlets, sourced from the
+official [Uttar Pradesh](https://www.manyavar.com/en-in/store-india/uttar-pradesh),
+[Bihar](https://www.manyavar.com/en-in/store-india/bihar), and
+[Karnataka](https://www.manyavar.com/en-in/store-india/karnataka) store locators.
+The mapping is illustrative only: generated sales, bills, stock, tiers,
+capacities, and store-to-outlet assignments are not Manyavar operational data.
+Route links open Google Maps for navigation; transfer lead times continue to
+come from the configured lead-time table, not a live routing service.
+
+## Deploy the frontend on Vercel
+
+The Vercel project serves the static frontend. The Node gateway and FastAPI
+backend run together on Render, where the persistent disk stores uploaded
+workbooks, SQLite approvals, and workflow history. The browser calls the
+Render gateway over HTTPS using an exact-origin CORS allowlist and an
+eight-hour signed bearer session; the Vercel build does not expose the backend
+shared secret. The short-lived bearer is kept in tab-scoped session storage so
+the default Vercel and Render hostnames do not depend on third-party cookies.
+This split is intentional: Vercel functions
+are not used as a proxy for the 200 MB workbook upload path or as persistent
+storage.
+
+### 1. Deploy the persistent backend
+
+Create a Render Blueprint from this repository and use [render.yaml](./render.yaml).
+The service uses the existing Docker image and mounts a persistent disk at
+`/app/data`. A paid Render plan is required for persistent disks. Configure:
+
+* `APPROVAL_TOKEN`: a long random token for production login.
+* `FRONTEND_ORIGINS`: comma-separated, exact browser origins such as
+  `https://manyavar-moves.vercel.app` and your custom production domain. Do not
+  add a trailing slash. Add preview domains explicitly if you need them.
+* `GEMINI_API_KEY`: optional, server-side only.
+
+Render generates `APP_SESSION_SECRET` and `API_SHARED_SECRET`. Keep these
+private and do not copy them into Vercel. The gateway uses the shared secret
+when it calls FastAPI; direct API calls without it are rejected. Set
+`DEMO_MODE=false` for the configured token login.
+
+The expected Render service origin is
+`https://manyavar-stock-mover.onrender.com`; use the actual origin shown by
+Render if it assigns a different hostname. Check
+`https://<render-host>/health` after deploy.
+
+### 2. Deploy the frontend
+
+Import the same Git repository into Vercel with the repository root as the
+project root. [vercel.json](./vercel.json) selects the static `public` output
+and `npm run build`. In Vercel Project Settings → Environment Variables, set
+`PUBLIC_API_BASE_URL` to the Render gateway origin, for example
+`https://manyavar-stock-mover.onrender.com`, for every environment you will
+deploy. Redeploy after changing it. The build intentionally fails on Vercel if
+this value is missing or is not HTTPS.
+
+After Vercel assigns the project URL, add its exact origin to Render's
+`FRONTEND_ORIGINS` and redeploy the backend. The generated
+`public/runtime-config.js` is ignored by Git; it contains only the public API
+origin and is generated at build time.
+
+The app's header references the official Manyavar-hosted Manyavar & Mohey
+wordmark image. It is an external brand asset; use the brand's approved asset
+or a locally supplied licensed copy if your production deployment requires
+third-party assets to be self-hosted.
+
+I cannot connect or publish a Vercel project from this repository without
+access to your Vercel account. The checked-in configuration prepares the
+project for import; the Render Blueprint and Vercel environment values above
+are the remaining account-level setup.
+
 The FastAPI process stores the last uploaded source, approval decisions, and
 analysis state in `DATA_DIR` (default `./data`). It reloads the latest source
 on restart. The daily scheduler recomputes from that most recently uploaded
@@ -72,6 +142,60 @@ docker compose up --build
 
 Open [http://localhost:3000](http://localhost:3000). The named Docker volume
 persists uploaded data and decisions.
+
+## Production deployment
+
+The application has one externally exposed Node.js gateway and one private
+FastAPI process. The gateway signs role sessions, applies permissions, and
+proxies `/api/*` requests to FastAPI. Browser code uses relative `/api` calls
+by default, so no API key is exposed in frontend assets.
+
+1. Copy the environment template:
+
+   ```bash
+   cp .env.example .env
+   ```
+
+2. Set deployment secrets and public URLs in `.env`:
+
+   ```dotenv
+   DEMO_MODE=false
+   APPROVAL_TOKEN=<long-random-token>
+   APP_SESSION_SECRET=<long-random-secret>
+   GEMINI_API_KEY=<optional-server-side-key>
+   PUBLIC_API_BASE_URL=/
+   FASTAPI_URL=http://127.0.0.1:8000
+   DATA_DIR=/app/data
+   ```
+
+   Never commit `.env`, `.env.*`, uploaded datasets, SQLite files, private keys,
+   or API tokens. `.env`, `.env.*`, `data/`, `*.sqlite`, `*.sqlite3`, private
+   keys, secrets, virtual environments, caches and logs are ignored by Git.
+   Generate random secrets with:
+
+   ```bash
+   openssl rand -hex 32
+   ```
+
+3. Deploy with Docker:
+
+   ```bash
+   docker compose up --build -d
+   docker compose ps
+   docker compose logs --tail=100 stock-mover
+   ```
+
+4. Terminate HTTPS at a trusted reverse proxy and proxy only port `3000`.
+   Keep FastAPI port `8000` private. Set `PUBLIC_API_BASE_URL` to the external
+   origin or deployment subpath (for example `/manyavar`) when the app is not
+   mounted at `/`.
+
+5. Before accepting real shipments, connect inventory/WMS exports to
+   `POST /api/upload` and a shipment/receipt integration to the validated
+   logistics workflow. The camera login is intentionally a demo convenience:
+   it opens a local camera preview and automatically displays “Face approved.”
+   It does not detect or compare faces, save images, establish identity, or
+   provide production authentication.
 
 ## Product capabilities
 
@@ -103,14 +227,28 @@ persists uploaded data and decisions.
 * **Product intelligence:** browse every SKU with generated copy based only on
   catalogue fields, product revenue and units, recent availability-corrected
   velocity, current store/warehouse stock, oldest-unit age, weekly trends, and
-  a same-SKU comparison across stores. Missing stock exposure is shown as
-  unknown rather than interpreted as weak demand.
+  a same-SKU comparison across stores. Each product has a placement lead based
+  on proven direct SKU sales or a clearly identified comparable SKU, destination
+  capacity, and current cover. Advisory leads are not executable moves; only a
+  pending rule-checked recommendation can be approved. Missing stock exposure
+  is shown as unknown rather than interpreted as weak demand.
+* **Relative sell-through grades:** product grades compare recent units per
+  recorded in-stock day within category and size: A is at/above the cohort upper
+  quartile, B is at/above the median, C is positive but below the median, WATCH
+  means zero sales despite recorded exposure, and UNKNOWN means no exposure.
+  Store grades use the same velocity basis relative to the network. The source
+  store tier (S++, S+, A, B) remains a separate field and is never replaced by
+  the performance grade. Sell-fit is a ranking heuristic, not a calibrated
+  probability.
 * **Bill analyzer:** compare recent top sellers, largest bills, and
   exposure-confirmed unsold stock by store. It links a dormant SKU to another
   selling store and shows a “ready move” only when the rule engine has an
   actual pending safe recommendation.
 * **Store detail:** drill into recent weekly sales/stock, top products,
   exposure-confirmed dormant inventory, capacity, and category position.
+* **Move validation evidence:** expand any recommendation to see capacity,
+  category-display floor, flagship protection, donor-cover or stale-stock
+  evidence, transit accounting, and configured lead-time checks.
 * **Network view:** inventory, warehouse stock, historic sales value, store
   capacity, category balance, recommendations, and operational exceptions.
 * **Availability-aware demand:** use the trailing observed stock weeks and

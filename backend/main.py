@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import csv
 import hashlib
+import hmac
 import io
 import json
 import os
@@ -17,17 +18,20 @@ import zipfile
 from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from statistics import median
 from typing import Any
+from urllib.parse import urlencode
 
-from fastapi import FastAPI, File, Header, HTTPException, Query, UploadFile
-from fastapi.responses import StreamingResponse
+from fastapi import FastAPI, File, Header, HTTPException, Query, Request, UploadFile
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from stock_mover import (  # noqa: E402
-    DEFAULT_AGE_DAYS, WAREHOUSE, approval_threshold_from_rules, as_date, as_number,
+    DEFAULT_AGE_DAYS, DEFAULT_MIN_COVER_DAYS, WAREHOUSE,
+    approval_threshold_from_rules, as_date, as_number,
     build_lead_time_overrides, build_recommendations, field, load_tables,
     validate_proposal_selection,
 )
@@ -37,6 +41,7 @@ from backend.app.optimizer import optimize_proposals  # noqa: E402
 
 DATA_DIR = Path(os.environ.get("DATA_DIR", ROOT / "data"))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
+API_SHARED_SECRET = os.environ.get("API_SHARED_SECRET", "")
 
 app = FastAPI(title="Manyavar Stock Mover API", version="1.0.0")
 state: dict[str, Any] = {
@@ -46,6 +51,15 @@ state: dict[str, Any] = {
     "products": {}, "sales_weekly": {}, "stock_weekly": {}, "bill_summaries": [],
     "sku_store_sales_weekly": {}, "sku_store_stock_weekly": {},
 }
+
+
+@app.middleware("http")
+async def require_gateway_secret(request: Request, call_next):
+    if API_SHARED_SECRET and request.url.path.startswith("/api/"):
+        supplied = request.headers.get("x-stockmover-api-secret", "")
+        if not hmac.compare_digest(supplied, API_SHARED_SECRET):
+            return JSONResponse(status_code=401, content={"detail": "Gateway authentication required."})
+    return await call_next(request)
 
 
 class Decision(BaseModel):
@@ -67,16 +81,29 @@ def _product_description(item: dict[str, Any]) -> str:
     category = str(field(item, "category", default="occasionwear"))
     size = str(field(item, "size", default=""))
     price = as_number(field(item, "mrp"))
+    cloth_type = str(field(item, "cloth_type", "fabric", default=""))
+    material = str(field(item, "material", "fabric", default=""))
+    colour = str(field(item, "colour", "color", default=""))
+    care = str(field(item, "care", "care_instructions", default=""))
     assortment = "year-round core collection" if as_number(field(item, "is_core_style")) else "seasonal fashion collection"
     packaging = as_number(field(item, "is_packaging"))
     if packaging:
         return f"{name} is a packaging SKU in size {size or 'free size'}, listed at {rupee(price)}. It is tracked separately from merchandise demand."
     size_copy = f" in size {size}" if size else ""
+    detail_parts = []
+    if cloth_type:
+        detail_parts.append(f"cloth type {cloth_type}")
+    if material:
+        detail_parts.append(f"material {material}")
+    if colour:
+        detail_parts.append(f"colour {colour}")
+    detail_copy = f" The catalogue identifies {'; '.join(detail_parts)}." if detail_parts else ""
+    care_copy = f" Care: {care}." if care else ""
     return (
         f"{name} is a {category} design from Manyavar's {assortment}{size_copy}. "
         f"The catalogue lists this variant at {rupee(price)} MRP. It is suited to "
-        "wedding celebrations, festive gatherings, and occasion dressing. "
-        "Fabric, colour, and care details are not specified in the source catalogue."
+        f"wedding celebrations, festive gatherings, and occasion dressing.{detail_copy}{care_copy}"
+        " Fabric, colour, and care details are not inferred beyond catalogue fields."
     )
 
 
@@ -420,12 +447,28 @@ def _build_analytics(tables: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
                 projected > 0 and exposed_last_week
                 and (last_sale is None or days_since_sale >= 7)
             )
+            dead_stock_confirmed = (
+                projected > 0
+                and days_in_stock > 0
+                and recent_sold == 0
+                and (
+                    days_since_sale is not None and days_since_sale >= 70
+                    or last_sale is None and age_days is not None and age_days >= 70
+                )
+            )
             design_exposure = successor_exposure_days[store_id, sku]
             no_sale_after_design = (
                 projected > 0 and design_launch is not None and design_exposure > 0
                 and sales_since_successor_by_store_sku[store_id, sku] == 0
             )
-            if seasonal_window and no_sale_for_seven_days:
+            if dead_stock_confirmed:
+                stock_risk = "dead_stock_70_day_no_sale"
+                stock_risk_reason = (
+                    f"No recorded sale for at least 70 days"
+                    f"{f' ({days_since_sale} days)' if days_since_sale is not None else ''}, "
+                    f"with {days_in_stock} recent in-stock days and {projected} unit(s) held."
+                )
+            elif seasonal_window and no_sale_for_seven_days:
                 stock_risk = "seasonal_7_day_no_sale"
                 stock_risk_reason = (
                     "No recorded sale for at least 7 days during a calendar-marked "
@@ -448,7 +491,11 @@ def _build_analytics(tables: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
             )
             store_performance.append({
                 "store_id": store_id,
+                "store_name": field(store, "store_name", "name", default=store_id),
                 "city": field(store, "city", default=""),
+                "address": field(store, "address", "full_address", default=""),
+                "store_locator_url": field(store, "store_locator_url", default=""),
+                "google_maps_url": field(store, "google_maps_url", default=""),
                 "tier": field(store, "tier", default=""),
                 "sales_units": units_by_store_sku[store_id, sku],
                 "sales_revenue": round(revenue_by_store_sku[store_id, sku], 2),
@@ -497,6 +544,7 @@ def _build_analytics(tables: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
             "margin_basis": margin_basis,
             "recent_velocity": round(recent_units_by_sku[sku] / recent_exposure_days, 3)
             if recent_exposure_days else None,
+            "recent_in_stock_days": recent_exposure_days,
             "store_stock_units": store_stock_units,
             "warehouse_units": warehouse_units,
             "network_stock_units": store_stock_units + warehouse_units,
@@ -511,6 +559,55 @@ def _build_analytics(tables: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
             "successor_launch_date": design_launch.isoformat() if design_launch else None,
             "store_performance": store_performance,
         }
+
+    product_cohorts: dict[tuple[str, str], list[float]] = defaultdict(list)
+    store_cohorts: dict[tuple[str, str], list[float]] = defaultdict(list)
+    for product in product_index.values():
+        cohort = (
+            str(field(product, "category", default="")).casefold(),
+            str(field(product, "size", default="")).casefold(),
+        )
+        if as_number(field(product, "is_packaging")):
+            continue
+        product_rate = product["recent_velocity"]
+        if product_rate is not None and product["recent_in_stock_days"] > 0:
+            product_cohorts[cohort].append(product_rate)
+        for metric in product["store_performance"]:
+            rate = metric["recent_velocity"]
+            if rate is not None and metric["recent_in_stock_days"] > 0:
+                store_cohorts[cohort].append(rate)
+
+    product_thresholds = {
+        cohort: _velocity_thresholds(values) for cohort, values in product_cohorts.items()
+    }
+    store_thresholds = {
+        cohort: _velocity_thresholds(values) for cohort, values in store_cohorts.items()
+    }
+    for product in product_index.values():
+        cohort = (
+            str(field(product, "category", default="")).casefold(),
+            str(field(product, "size", default="")).casefold(),
+        )
+        if as_number(field(product, "is_packaging")):
+            product["sell_through_grade"] = "N/A"
+            product["sell_through_grade_basis"] = "Packaging is excluded from merchandise velocity grading."
+            continue
+        median, upper_quartile = product_thresholds.get(cohort, (None, None))
+        product["sell_through_grade"] = _velocity_grade(
+            product["recent_velocity"], product["recent_in_stock_days"],
+            product["recent_sold_units"], median, upper_quartile,
+        )
+        product["sell_through_grade_basis"] = (
+            "Relative to the same category and size: A is at/above the cohort upper quartile, "
+            "B is at/above the cohort median, C is positive but below the median; WATCH means "
+            "zero recent sales with recorded exposure, UNKNOWN means no recorded exposure."
+        )
+        median, upper_quartile = store_thresholds.get(cohort, (None, None))
+        for metric in product["store_performance"]:
+            metric["sell_through_grade"] = _velocity_grade(
+                metric["recent_velocity"], metric["recent_in_stock_days"],
+                metric["recent_units"], median, upper_quartile,
+            )
 
     bill_summaries = []
     for bill in bills.values():
@@ -567,6 +664,7 @@ def _run_analysis_tables(tables: dict[str, list[dict[str, Any]]],
     validate_proposal_selection(optimized, tables)
     analytics = _build_analytics(tables)
     item_by_sku = {str(field(row, "sku_id", default="")): row for row in tables["items"]}
+    store_by_id = {str(field(row, "store_id", default="")): row for row in tables["stores"]}
     approval_limit = approval_threshold_from_rules(tables["rules"])
     enriched = []
     for move in optimized:
@@ -616,6 +714,22 @@ def _run_analysis_tables(tables: dict[str, list[dict[str, Any]]],
             "approval_threshold_mrp": approval_limit,
             "requires_human_approval": move["qty"] * mrp > approval_limit,
         })
+        for endpoint in ("from", "to"):
+            location_id = move[f"{endpoint}_location"]
+            store = store_by_id.get(location_id, {})
+            move[f"{endpoint}_store_name"] = str(field(
+                store, "store_name", "name", default=location_id))
+            move[f"{endpoint}_store_city"] = str(field(store, "city", default=""))
+            move[f"{endpoint}_store_state"] = str(field(store, "state", default=""))
+            move[f"{endpoint}_store_address"] = str(field(store, "address", "full_address", default=""))
+            move[f"{endpoint}_store_locator_url"] = str(field(store, "store_locator_url", default=""))
+            move[f"{endpoint}_store_maps_url"] = str(field(store, "google_maps_url", default=""))
+        if move["from_store_address"] and move["to_store_address"]:
+            move["route_maps_url"] = "https://www.google.com/maps/dir/?" + urlencode({
+                "api": "1",
+                "origin": move["from_store_address"],
+                "destination": move["to_store_address"],
+            })
         encoded = "|".join(str(move.get(column, "")) for column in (
             "move_type", "from_location", "to_location", "sku_id", "qty", "arrival_date"))
         move["id"] = hashlib.sha256(encoded.encode()).hexdigest()[:16]
@@ -718,6 +832,27 @@ def _scoped_product(product: dict[str, Any], store_ids: set[str]) -> dict[str, A
     }
 
 
+def _best_pending_outbound_move(
+    store_id: str,
+    sku_id: str,
+    allowed_target_ids: set[str] | None = None,
+) -> dict[str, Any] | None:
+    candidates = [
+        move for move in state["moves"]
+        if move["move_type"] == "STORE_TO_STORE"
+        and move["from_location"] == store_id
+        and move["sku_id"] == sku_id
+        and move["decision"] == "pending"
+        and (allowed_target_ids is None or move["to_location"] in allowed_target_ids)
+    ]
+    return max(candidates, key=lambda move: (
+        as_number(move.get("estimated_gross_profit_14d")),
+        as_number(move.get("sell_probability_pct")),
+        -((as_date(move.get("arrival_date")) or date.max)
+          - (as_date(state.get("as_of")) or date.min)).days,
+    ), default=None)
+
+
 def _similar_products(product: dict[str, Any], exclude_store_id: str | None = None,
                       allowed_store_ids: set[str] | None = None
                       ) -> list[dict[str, Any]]:
@@ -725,6 +860,9 @@ def _similar_products(product: dict[str, Any], exclude_store_id: str | None = No
     size = str(product.get("size", "")).casefold()
     price = as_number(product.get("mrp"))
     style_id = str(product.get("style_id", ""))
+    material = str(product.get("material", product.get("fabric", ""))).strip().casefold()
+    cloth_type = str(product.get("cloth_type", "")).strip().casefold()
+    colour = str(product.get("colour", product.get("color", ""))).strip().casefold()
     if not category or not size or not price or as_number(product.get("is_packaging")):
         return []
 
@@ -749,6 +887,25 @@ def _similar_products(product: dict[str, Any], exclude_store_id: str | None = No
         price_difference = abs(candidate_price - price) / price
         if price_difference > 0.3 or candidate["recent_sold_units"] <= 0:
             continue
+        candidate_material = str(candidate.get("material", candidate.get("fabric", ""))).strip().casefold()
+        candidate_cloth = str(candidate.get("cloth_type", "")).strip().casefold()
+        candidate_colour = str(candidate.get("colour", candidate.get("color", ""))).strip().casefold()
+        material_match = bool(
+            material and candidate_material and material == candidate_material
+        )
+        cloth_match = bool(
+            cloth_type and candidate_cloth and cloth_type == candidate_cloth
+        )
+        colour_match = bool(
+            colour and candidate_colour and colour == candidate_colour
+        )
+        match_parts = ["same category and size", "MRP within 30%"]
+        if material_match:
+            match_parts.append("same material")
+        if cloth_match:
+            match_parts.append("same cloth type")
+        if colour_match:
+            match_parts.append("same colour")
         demand = [
             row for row in candidate_stores
             if row["store_id"] != exclude_store_id and row["recent_units"] > 0
@@ -766,8 +923,13 @@ def _similar_products(product: dict[str, Any], exclude_store_id: str | None = No
             "demand_store": best_demand["store_id"] if best_demand else None,
             "demand_store_recent_units": best_demand["recent_units"] if best_demand else 0,
             "recent_velocity": candidate["recent_velocity"],
-            "similarity_basis": "same category and size; MRP within 30%",
-            "material_match_available": False,
+            "similarity_basis": "; ".join(match_parts),
+            "material_match_available": material_match,
+            "cloth_type_match": cloth_match,
+            "colour_match": colour_match,
+            "fabric": candidate.get("fabric", candidate.get("material", "")),
+            "cloth_type": candidate.get("cloth_type", ""),
+            "colour": candidate.get("colour", candidate.get("color", "")),
         })
     matches.sort(key=lambda row: (
         -row["demand_store_recent_units"], -row["recent_sold_units"],
@@ -776,10 +938,212 @@ def _similar_products(product: dict[str, Any], exclude_store_id: str | None = No
     return matches[:5]
 
 
+def _placement_suggestion(
+    product: dict[str, Any],
+    store_summaries: dict[str, dict[str, Any]],
+    allowed_store_ids: set[str] | None = None,
+    focus_store_id: str | None = None,
+) -> dict[str, Any]:
+    if as_number(product.get("is_packaging")):
+        return {
+            "status": "not_applicable",
+            "reason": "Packaging is tracked separately and is not allocated as merchandise.",
+        }
+
+    def destination_allowed(location: str) -> bool:
+        return allowed_store_ids is None or location in allowed_store_ids
+
+    selected_moves = [
+        move for move in state["moves"]
+        if move["sku_id"] == product.get("sku_id")
+        and move["move_type"] in {"STORE_TO_STORE", "WAREHOUSE_TO_STORE"}
+        and move["decision"] == "pending"
+        and destination_allowed(move["to_location"])
+        and (move["from_location"] == "WH-KOL" or destination_allowed(move["from_location"]))
+        and (focus_store_id is None or focus_store_id in {
+            move["from_location"], move["to_location"],
+        })
+    ]
+    if selected_moves:
+        move = max(selected_moves, key=lambda row: (
+            as_number(row.get("estimated_gross_profit_14d")),
+            as_number(row.get("sell_probability_pct")),
+        ))
+        return {
+            "status": "ready_for_review",
+            "is_executable": True,
+            "source_location": move["from_location"],
+            "source_store_name": move.get("from_store_name", move["from_location"]),
+            "destination_location": move["to_location"],
+            "destination_store_name": move.get("to_store_name", move["to_location"]),
+            "destination_city": move.get("to_store_city", ""),
+            "destination_address": move.get("to_store_address", ""),
+            "destination_maps_url": move.get("to_store_maps_url", ""),
+            "route_maps_url": move.get("route_maps_url", ""),
+            "qty": move["qty"],
+            "arrival_date": move["arrival_date"],
+            "sell_fit_pct": move.get("sell_probability_pct"),
+            "daily_velocity": move.get("daily_velocity"),
+            "reason": move["reason"],
+            "move_id": move["id"],
+        }
+
+    performance = [
+        row for row in product.get("store_performance", [])
+        if destination_allowed(str(row["store_id"]))
+    ]
+    direct_targets = []
+    for metric in performance:
+        if focus_store_id and metric["store_id"] == focus_store_id:
+            continue
+        rate = as_number(metric.get("recent_velocity"))
+        store = store_summaries.get(str(metric["store_id"]), {})
+        free_capacity = max(0, as_number(store.get("capacity")) - as_number(store.get("stock_units")))
+        if rate <= 0 or metric.get("recent_in_stock_days", 0) <= 0 or free_capacity <= 0:
+            continue
+        cover = metric["stock_units"] / rate
+        direct_targets.append((cover <= DEFAULT_MIN_COVER_DAYS,
+                               rate / (1 + cover / DEFAULT_MIN_COVER_DAYS),
+                               rate, metric, cover))
+
+    evidence = "direct SKU sales"
+    target = None
+    target_cover = None
+    target_rate = 0.0
+    similar_match = None
+    if direct_targets:
+        _, _, target_rate, target, target_cover = max(direct_targets, key=lambda row: row[:3])
+    else:
+        for similar in _similar_products(
+            product, exclude_store_id=focus_store_id,
+            allowed_store_ids=allowed_store_ids,
+        ):
+            peer_product = state["products"].get(str(similar["sku_id"]), {})
+            target_candidates = []
+            for metric in peer_product.get("store_performance", []):
+                location = str(metric["store_id"])
+                store = store_summaries.get(location, {})
+                free_capacity = max(
+                    0, as_number(store.get("capacity")) - as_number(store.get("stock_units"))
+                )
+                rate = as_number(metric.get("recent_velocity"))
+                if (
+                    not destination_allowed(location)
+                    or location == focus_store_id
+                    or metric["recent_units"] <= 0
+                    or rate <= 0
+                    or free_capacity <= 0
+                ):
+                    continue
+                cover = as_number(metric.get("stock_units")) / rate
+                target_candidates.append((
+                    cover <= DEFAULT_MIN_COVER_DAYS,
+                    rate / (1 + cover / DEFAULT_MIN_COVER_DAYS),
+                    metric["recent_units"], metric, rate, cover,
+                ))
+            if target_candidates:
+                _, _, _, target, target_rate, target_cover = max(
+                    target_candidates, key=lambda row: row[:3],
+                )
+                similar_match = similar
+                evidence = "comparable SKU sales"
+                break
+
+    if target is None:
+        return {
+            "status": "monitor",
+            "is_executable": False,
+            "source_location": None,
+            "destination_location": None,
+            "reason": (
+                "No store has verified direct or comparable demand and free capacity; "
+                "keep this SKU under review rather than inventing a transfer."
+            ),
+        }
+
+    source_candidates = [
+        row for row in performance
+        if (focus_store_id is None or row["store_id"] == focus_store_id)
+        and row["store_id"] != target["store_id"]
+        and row["stock_units"] > 0
+        and row["recent_in_stock_days"] >= 7
+        and row["recent_units"] == 0
+    ]
+    source = max(source_candidates, key=lambda row: (
+        row.get("stock_risk") == "dead_stock_70_day_no_sale",
+        as_number(row.get("stock_age_days")),
+        as_number(row.get("stock_units")),
+    ), default=None)
+    target_store = store_summaries.get(str(target["store_id"]), {})
+    direct_reason = (
+        f"{target.get('store_name') or target['store_id']} recorded "
+        f"{int(as_number(target.get('recent_units', 0))):,} recent units at "
+        f"{target_rate:.3f} units per in-stock day, with about "
+        f"{target_cover:.1f} days of cover."
+        if evidence == "direct SKU sales"
+        else (
+            f"Comparable {similar_match['sku_id']} demand was observed at "
+            f"{target.get('store_name') or target['store_id']} "
+            f"({int(as_number(target.get('recent_units'))):,} recent units; "
+            f"{similar_match['similarity_basis']})."
+        )
+    )
+    if target_cover is not None and target_cover > DEFAULT_MIN_COVER_DAYS:
+        direct_reason += " Destination already exceeds 30 days of cover; treat this as a placement lead, not a dispatch."
+    else:
+        direct_reason += " Confirm a safe donor quantity and rules before dispatch."
+    return {
+        "status": "placement_lead",
+        "is_executable": False,
+        "source_location": source["store_id"] if source else None,
+        "source_store_name": source.get("store_name") if source else None,
+        "source_stock_units": source.get("stock_units") if source else None,
+        "destination_location": target["store_id"],
+        "destination_store_name": target.get("store_name", target["store_id"]),
+        "destination_city": target.get("city", ""),
+        "destination_address": target.get("address", ""),
+        "destination_maps_url": target.get("google_maps_url", ""),
+        "destination_capacity_remaining_units": max(
+            0, as_number(target_store.get("capacity")) - as_number(target_store.get("stock_units"))
+        ),
+        "destination_cover_days": round(target_cover, 1) if target_cover is not None else None,
+        "daily_velocity": round(target_rate, 3),
+        "evidence": evidence,
+        "similar_sku_id": similar_match.get("sku_id") if similar_match else None,
+        "reason": direct_reason,
+    }
+
+
 def _date_range(tables: dict[str, list[dict[str, Any]]]) -> tuple[date | None, date | None]:
     days = [as_date(field(row, "as_of_date")) for row in tables["stock_snapshot"]]
     days = [day for day in days if day]
     return min(days, default=None), max(days, default=None)
+
+
+def _velocity_grade(
+    velocity: float | None,
+    exposure_days: float,
+    sold_units: float,
+    median: float | None,
+    upper_quartile: float | None,
+) -> str:
+    if exposure_days <= 0:
+        return "UNKNOWN"
+    if sold_units <= 0:
+        return "WATCH"
+    if upper_quartile is not None and velocity is not None and velocity >= upper_quartile:
+        return "A"
+    if median is not None and velocity is not None and velocity >= median:
+        return "B"
+    return "C"
+
+
+def _velocity_thresholds(values: list[float]) -> tuple[float | None, float | None]:
+    positive = sorted(value for value in values if value > 0)
+    if not positive:
+        return None, None
+    upper_index = min(len(positive) - 1, int(len(positive) * 0.75 + 0.999) - 1)
+    return median(positive), positive[upper_index]
 
 
 def _summary(tables: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
@@ -848,10 +1212,21 @@ def _summary(tables: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
 def _store_summaries(tables: dict[str, list[dict[str, Any]]],
                      store_total: dict[str, float] | None = None) -> list[dict[str, Any]]:
     store_rows = {str(field(row, "store_id", default="")): row for row in tables["stores"]}
+    if store_total is None:
+        store_total = defaultdict(float)
+        for stock in tables["stock_snapshot"]:
+            location = str(field(stock, "location_id", default=""))
+            if location in store_rows:
+                store_total[location] += (
+                    as_number(field(stock, "on_hand"))
+                    + as_number(field(stock, "in_transit"))
+                )
     sku_items = {str(field(row, "sku_id", default="")): row for row in tables["items"]}
     sales = defaultdict(float)
     stock_days = defaultdict(float)
     sold_units = defaultdict(float)
+    recent_sold_units = defaultdict(float)
+    recent_stock_days = defaultdict(float)
     footfall = defaultdict(float)
     recent_bill_count = defaultdict(int)
     total_bill_count = defaultdict(int)
@@ -859,6 +1234,16 @@ def _store_summaries(tables: dict[str, list[dict[str, Any]]],
     roster_days = defaultdict(set)
     bill_store = {str(field(row, "bill_id", default="")): str(field(row, "store_id", default=""))
                   for row in tables["bills"]}
+    bill_dates = {
+        str(field(row, "bill_id", default="")): as_date(field(row, "bill_date", "date"))
+        for row in tables["bills"]
+    }
+    stock_dates = [
+        as_date(field(row, "week_ending")) for row in tables.get("stock_weekly", [])
+    ]
+    stock_dates = [day for day in stock_dates if day]
+    as_of = max(stock_dates, default=None)
+    recent_start = as_of - timedelta(days=83) if as_of else None
     footfall_dates = [as_date(field(row, "date")) for row in tables.get("footfall_daily", [])]
     footfall_dates = [day for day in footfall_dates if day]
     footfall_start, footfall_end = min(footfall_dates, default=None), max(footfall_dates, default=None)
@@ -886,9 +1271,23 @@ def _store_summaries(tables: dict[str, list[dict[str, Any]]],
         qty = as_number(field(row, "qty"))
         sales[store] += qty * as_number(field(row, "selling_price"))
         sold_units[store] += qty
+        bill_date = bill_dates.get(str(field(row, "bill_id", default="")))
+        if recent_start and as_of and bill_date and recent_start <= bill_date <= as_of:
+            recent_sold_units[store] += qty
     for row in tables["stock_weekly"]:
-        stock_days[str(field(row, "store_id", default="")),
-                   str(field(row, "sku_id", default=""))] += as_number(field(row, "days_in_stock"))
+        store_id = str(field(row, "store_id", default=""))
+        sku = str(field(row, "sku_id", default=""))
+        days = as_number(field(row, "days_in_stock"))
+        stock_days[store_id, sku] += days
+        week_ending = as_date(field(row, "week_ending"))
+        if recent_start and as_of and week_ending and recent_start <= week_ending <= as_of:
+            recent_stock_days[store_id] += days
+    store_velocity_values = [
+        recent_sold_units[store_id] / recent_stock_days[store_id]
+        for store_id in store_rows
+        if recent_stock_days[store_id] > 0 and recent_sold_units[store_id] > 0
+    ]
+    velocity_median, velocity_upper = _velocity_thresholds(store_velocity_values)
     rows = []
     for store_id, store in store_rows.items():
         tier = str(field(store, "tier", default=""))
@@ -897,11 +1296,31 @@ def _store_summaries(tables: dict[str, list[dict[str, Any]]],
         rows.append({
             "store_id": store_id, "city": field(store, "city", default=""),
             "state": field(store, "state", default=""), "tier": tier,
+            "store_name": field(store, "store_name", "name", default=""),
+            "address": field(store, "address", "full_address", default=""),
+            "location_source": field(store, "location_source", default=""),
+            "store_locator_url": field(store, "store_locator_url", default=""),
+            "google_maps_url": field(store, "google_maps_url", default=""),
             "area_manager_id": field(store, "area_manager_id", default=""),
             "stock_units": int(units), "capacity": int(capacity),
             "capacity_pct": round(100 * units / capacity, 1) if capacity else 0,
             "sales_revenue": round(sales[store_id], 2),
             "units_sold": int(sold_units[store_id]),
+            "recent_units_sold": int(recent_sold_units[store_id]),
+            "recent_in_stock_days": int(recent_stock_days[store_id]),
+            "recent_velocity": round(
+                recent_sold_units[store_id] / recent_stock_days[store_id], 3
+            ) if recent_stock_days[store_id] else None,
+            "sell_through_grade": _velocity_grade(
+                recent_sold_units[store_id] / recent_stock_days[store_id]
+                if recent_stock_days[store_id] else None,
+                recent_stock_days[store_id], recent_sold_units[store_id],
+                velocity_median, velocity_upper,
+            ),
+            "sell_through_grade_basis": (
+                "Relative to the network median and upper quartile of recent units per "
+                "recorded SKU in-stock day; zero sales with exposure is WATCH, no exposure is UNKNOWN."
+            ),
             "bill_count": total_bill_count[store_id],
             "average_bill_value": round(sales[store_id] / total_bill_count[store_id], 2)
             if total_bill_count[store_id] else 0,
@@ -1240,9 +1659,12 @@ def products(
     unsold_only: bool = False,
     limit: int = Query(100, ge=1, le=500),
 ) -> dict[str, Any]:
-    _require_data()
+    tables = _require_data()
     _ensure_store_scope(store_id, actor_role, area_manager_id)
     managed = _area_store_ids(area_manager_id) if actor_role == "area_manager" else None
+    store_summaries = {
+        row["store_id"]: row for row in _store_summaries(tables)
+    }
     result = []
     needle = q.casefold().strip() if q else ""
     for product in state["products"].values():
@@ -1268,6 +1690,9 @@ def products(
             **product,
             "store_metrics": store_metrics,
             "description": product["description"],
+            "placement_suggestion": _placement_suggestion(
+                product, store_summaries, managed, store_id,
+            ),
         })
     sort_fields = {
         "recent": lambda row: row["store_metrics"]["recent_units"] if row["store_metrics"]
@@ -1302,15 +1727,20 @@ def analytics_meta() -> dict[str, Any]:
 @app.get("/api/products/{sku_id}")
 def product_detail(
     sku_id: str,
+    store_id: str | None = None,
     actor_role: str | None = Header(None, alias="x-stockmover-role"),
     area_manager_id: str | None = Header(None, alias="x-stockmover-area-manager"),
 ) -> dict[str, Any]:
     _require_data()
+    _ensure_store_scope(store_id, actor_role, area_manager_id)
     source_product = state["products"].get(sku_id)
     if source_product is None:
         raise HTTPException(404, "SKU not found in the uploaded catalogue.")
     managed = _area_store_ids(area_manager_id) if actor_role == "area_manager" else None
     product = _scoped_product(source_product, managed) if managed is not None else source_product
+    store_summaries = {
+        row["store_id"]: row for row in _store_summaries(state["tables"])
+    }
     weeks = state["weeks"]
     if managed is None:
         sales = state["sales_weekly"].get(sku_id, {})
@@ -1330,13 +1760,16 @@ def product_detail(
     ]
     return {
         "product": product,
+        "placement_suggestion": _placement_suggestion(
+            product, store_summaries, managed, store_id,
+        ),
         "sales_trend": [{"week": week, "units": sales.get(week, 0)} for week in weeks],
         "stock_trend": [{"week": week, "units": stock.get(week, 0)} for week in weeks],
         "transfer_recommendations": transfer_moves,
         "similar_products": _similar_products(product, allowed_store_ids=managed),
         "similarity_notice": (
-            "Matches use category, size, and a 30% MRP band. Fabric/material fields are not "
-            "present in the supplied catalogue, so no material match is claimed."
+            "Matches use category, size, and a 30% MRP band. When catalogue fields exist, "
+            "material, cloth type and colour are also used as explicit match signals."
         ),
     }
 
@@ -1374,6 +1807,10 @@ def store_detail(
     )
     for product in stock_risk:
         product["similar_demand"] = _similar_products(product, exclude_store_id=store_id)
+        product["recommended_move"] = _best_pending_outbound_move(
+            store_id, str(product["sku_id"]),
+            _area_store_ids(area_manager_id) if actor_role == "area_manager" else None,
+        )
     weeks = state["weeks"]
     sales = state["store_sales_weekly"].get(store_id, {})
     stock = state["store_stock_weekly"].get(store_id, {})
@@ -1458,11 +1895,9 @@ def bill_analysis(
                                if candidate["store_id"] != target_store
                                and candidate["recent_units"] > 0
                                and candidate["store_id"] in allowed_stores), None)
-            transfer = next((move for move in state["moves"]
-                             if move["sku_id"] == product["sku_id"]
-                             and move["to_location"] == target_store
-                             and move["move_type"] == "STORE_TO_STORE"
-                             and move["decision"] == "pending"), None)
+            transfer = _best_pending_outbound_move(
+                target_store, str(product["sku_id"]), allowed_stores
+                if actor_role == "area_manager" else None)
             dormant.append({
                 **product,
                 "store_metrics": metric,

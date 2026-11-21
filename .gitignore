@@ -7,3 +7,9 @@ __pycache__/
 .venv/
 data/
 *.log
+*.sqlite
+*.sqlite3
+*.pem
+*.key
+secrets/
+public/runtime-config.js

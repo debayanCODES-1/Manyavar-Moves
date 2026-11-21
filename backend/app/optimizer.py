@@ -73,6 +73,9 @@ def optimize_proposals(moves: list[dict[str, Any]], tables: dict[str, list[dict[
                                 - date.fromisoformat(move["dispatch_date"])).days)
         horizon = max(1.0, 14.0 - lead_days)
         expected_units = min(qty, velocity * horizon)
+        sell_probability = max(0.03, min(0.96,
+                                         as_number(move.get("sell_probability_pct")) / 100.0))
+        affinity = max(0.0, min(100.0, as_number(move.get("store_affinity_score"))))
         urgency = 1.0 / max(1.0, as_number(move.get("donor_cover_after_days"), 60))
         if move["move_type"] == "STORE_TO_WAREHOUSE":
             age_days = max(0.0, as_number(move.get("stock_age_days")))
@@ -83,7 +86,11 @@ def optimize_proposals(moves: list[dict[str, Any]], tables: dict[str, list[dict[
         elif move["move_type"] == "STORE_TO_STORE":
             donor_velocity = max(0.0, as_number(move.get("donor_daily_velocity")))
             incremental_units = min(qty, max(0.0, velocity - donor_velocity) * horizon)
-            opportunity = margin * incremental_units * (1.0 + urgency)
+            opportunity = (
+                margin * incremental_units * (1.0 + urgency)
+                * (0.5 + sell_probability)
+                * (1.0 + affinity / 100.0)
+            )
             age_days = max(0.0, as_number(move.get("stock_age_days")))
             recovery_proxy = 0.0
             if age_days >= 120:
@@ -95,7 +102,11 @@ def optimize_proposals(moves: list[dict[str, Any]], tables: dict[str, list[dict[
             })
             scores.append(max(0.01, opportunity + recovery_proxy))
         else:
-            opportunity = margin * expected_units * (1.0 + urgency)
+            opportunity = (
+                margin * expected_units * (1.0 + urgency)
+                * (0.5 + sell_probability)
+                * (1.0 + affinity / 100.0)
+            )
             score_components.append({"margin_opportunity": opportunity})
             scores.append(max(0.01, opportunity))
 
@@ -192,6 +203,9 @@ def _greedy_limit(moves: list[dict[str, Any]], tables: dict[str, list[dict[str, 
             return max(0.01, as_number(field(item, "cost_price")) * qty * age_factor * 0.1)
         margin = max(0.0, as_number(field(item, "mrp")) - as_number(field(item, "cost_price")))
         velocity = max(0.0, as_number(move.get("daily_velocity")))
+        sell_probability = max(0.03, min(0.96,
+                                         as_number(move.get("sell_probability_pct")) / 100.0))
+        affinity = max(0.0, min(100.0, as_number(move.get("store_affinity_score"))))
         lead = 0
         if move.get("dispatch_date") and move.get("arrival_date"):
             lead = max(0, (date.fromisoformat(move["arrival_date"])
@@ -206,7 +220,13 @@ def _greedy_limit(moves: list[dict[str, Any]], tables: dict[str, list[dict[str, 
             recovery = 0
         expected_units = min(qty, velocity * horizon)
         urgency = 1.0 / max(1.0, as_number(move.get("donor_cover_after_days"), 60))
-        return max(0.01, margin * expected_units * (1.0 + urgency) + recovery)
+        return max(
+            0.01,
+            margin * expected_units * (1.0 + urgency)
+            * (0.5 + sell_probability)
+            * (1.0 + affinity / 100.0)
+            + recovery,
+        )
 
     used = defaultdict(int)
     selected = []

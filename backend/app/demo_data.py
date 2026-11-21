@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import date, timedelta
 from typing import Any
+from urllib.parse import urlencode
 
 
 def build_demo_tables() -> dict[str, list[dict[str, Any]]]:
@@ -27,6 +28,80 @@ def build_demo_tables() -> dict[str, list[dict[str, Any]]]:
         ("Gaya", "Bihar", "East", "AM-05", 2),
         ("Bengaluru", "Karnataka", "South", "AM-06", 4),
     ]
+    official_outlets = {
+        "Lucknow": [
+            ("Manyavar - Hazratganj", "Shop no 1, plot 31/56, 48, MG Road, Hazratganj, Lucknow, Uttar Pradesh 226001",
+             "https://www.manyavar.com/en-in/store-india/uttar-pradesh/lucknow/manyavar-hazratganj-VFPLAFHG",
+             "ChIJJYEmern9mzkRquhsbkWCsIg"),
+            ("Manyavar and Mohey - Shahnajaf Road", "Rohit House, 1 Shahnajaf Road, Hazratganj, Lucknow, Uttar Pradesh 226001",
+             "https://www.manyavar.com/en-in/store-india/uttar-pradesh/lucknow/manyavar-and-mohey-shahnajaf-rd-VFPLAAHG",
+             "ChIJMRtSLQf9mzkRDalGLr-4OIE"),
+            ("Manyavar - Aminabad", "166/3, Opp. Jhanday Wala Park, Aminabad, Lucknow, Uttar Pradesh 226018",
+             "https://www.manyavar.com/en-in/store-india/uttar-pradesh/lucknow/manyavar-aminabad-VFPLHLA2",
+             "ChIJaSNS3Vj9mzkRunbBZMMYKK8"),
+            ("Manyavar - Kapoorthala Crossing Aliganj", "B 14, Sector F, Kapoorthala Crossing, Aliganj, Lucknow, Uttar Pradesh 226024",
+             "https://www.manyavar.com/en-in/store-india/uttar-pradesh/lucknow/manyavar-kapoorthala-crossing-aliganj-VFPLAEKT",
+             "ChIJA-jeFT1XmTkREc7AmjalQA8"),
+        ],
+        "Kanpur": [
+            ("Manyavar and Mohey - Govind Nagar", "126/13/357-359, Chawla Market, Kanpur, Uttar Pradesh 208006",
+             "https://www.manyavar.com/en-in/store-india/uttar-pradesh/kanpur/manyavar-and-mohey-govind-nagar-VFPLJSGN",
+             "ChIJU7_ecN5HnDkR8odHvvJQfPE"),
+            ("Manyavar and Mohey - PPN Market", "14/125, Civil Line Road, The Mall, PPN Market, Kanpur, Uttar Pradesh 208001",
+             "https://www.manyavar.com/en-in/store-india/uttar-pradesh/kanpur/manyavar-and-mohey-ppn-market-VFPLJSK2",
+             "ChIJR_o8rTw5nDkRbEt1tDFCipU"),
+            ("Manyavar - Naveen Market", "Stall No. 13-14, Naveen Market, Kanpur, Uttar Pradesh 208001",
+             "https://www.manyavar.com/en-in/store-india/uttar-pradesh/kanpur/manyavar-naveen-market-VFPLBCN3",
+             "ChIJBbuqaKE4nDkR-7lTx54_EPI"),
+        ],
+        "Varanasi": [
+            ("Manyavar - Shastri Nagar Chowraha", "Shop No. 12, 24, Sigra Crossing, Shastri Nagar, Sigra, Varanasi, Uttar Pradesh 221002",
+             "https://www.manyavar.com/en-in/store-india/uttar-pradesh/varanasi/manyavar-shastri-nagar-chowraha-VFPLSRSS",
+             "ChIJ49WljPwtjjkROXVwS43azXA"),
+            ("Manyavar and Mohey - Sigra", "No. D 57/60B, Sigra, Varanasi, Uttar Pradesh 221010",
+             "https://www.manyavar.com/en-in/store-india/uttar-pradesh/varanasi/manyavar-and-mohey-sigra-VFPLSR2S",
+             "ChIJWUvSzUItjjkRBGFredX1Y2s"),
+            ("Manyavar and Mohey - Maldahiya", "C 27/274 A-A1, Jai Singh Building, Maldahiya, Varanasi, Uttar Pradesh 221002",
+             "https://www.manyavar.com/en-in/store-india/uttar-pradesh/varanasi/manyavar-and-mohey-maldahiya-VFPLSRS2",
+             "ChIJzdLFmgkujjkRkXf_-HLdoVA"),
+        ],
+        "Patna": [
+            ("Manyavar and Mohey - New Dak Bunglow Road", "G-4, N.P. Center, Patna, Bihar 800001",
+             "https://www.manyavar.com/en-in/store-india/bihar/patna/manyavar-and-mohey-new-dak-bunglow-road-VFPLVFRA",
+             "ChIJOxPpwVxY7TkRwK9QWy77pbE"),
+            ("Manyavar and Mohey - Kankarbagh", "Holding No. 3015, Ward No. 35, Kankarbagh Circle-8A, Patna, Bihar 800020",
+             "https://www.manyavar.com/en-in/store-india/bihar/patna/manyavar-and-mohey-kankarbagh-VFPLSSKB",
+             "ChIJN9s55vBZ7TkR-ycsMrWfUPw"),
+            ("Manyavar and Mohey - Boring Road", "1st & 2nd Floor, Savitri Commercial Complex, Boring Road, Patna, Bihar 800001",
+             "https://www.manyavar.com/en-in/store-india/bihar/patna/manyavar-and-mohey-boring-road-1-VFPLVFUK",
+             "ChIJedxqaTlZ7TkRpvhnwheLED8"),
+            ("Manyavar and Mohey - City Centre Mall", "Unit CCPTC0201 & C0202, Second Floor, Block C, Utkarsh Sfatik Limited, Budh Marg, Lodipur, Patna, Bihar 800001",
+             "https://www.manyavar.com/en-in/store-india/bihar/patna/manyavar-and-mohey-city-centre-mall-patna-2-VFPLLSP2",
+             "ChIJ98FOtJg4nDkRo9LFr0LrfQc"),
+        ],
+        "Gaya": [
+            ("Manyavar and Mohey - GB Road", "Opposite East Gate of Zila School, beside Bata showroom, G.B. Road, Gaya, Bihar 823001",
+             "https://www.manyavar.com/en-in/store-india/bihar/gaya/manyavar-and-mohey-gb-road-VFPLRMTG",
+             "ChIJhWpeV78r8zkRzlhZmDLpr44"),
+            ("Manyavar - Bazaza Road", "Manyavar showroom, near Chhatta Masjid, 1st Floor, Bazaza Road, Gaya, Bihar 823001",
+             "https://www.manyavar.com/en-in/store-india/bihar/gaya/manyavar-bazaza-road-VFPLVFG1",
+             "ChIJg_D67T0q8zkRNHw8I_QUTF0"),
+        ],
+        "Bengaluru": [
+            ("Manyavar - Basavanagudi", "Shop No. G-1, #123, Prasanna Complex, Dr. DVG Road, Basavanagudi, Bengaluru, Karnataka 560004",
+             "https://www.manyavar.com/en-in/store-india/karnataka/bengaluru/manyavar-basavanagudi-VFPLPRDR",
+             "ChIJEwAAAO0VrjsRXuwGfEfTB9c"),
+            ("Manyavar - Mantri Mall", "Mantri Square, Shop No. 57, First Floor, No. 1 Sampige Road, Malleshwaram, Bengaluru, Karnataka 560003",
+             "https://www.manyavar.com/en-in/store-india/karnataka/bengaluru/manyavar-mantri-mall-VFPLVFMM",
+             "ChIJ74cnACMWrjsRLDKc1i7_EJ8"),
+            ("Manyavar and Mohey - Jaya Nagar", "No. 80 (Old No. 391), SMS Complex, 11th Main, 3rd Block, Jayanagar, Bengaluru, Karnataka 560011",
+             "https://www.manyavar.com/en-in/store-india/karnataka/bengaluru/manyavar-and-mohey-jaya-nagar-VFPLNM03",
+             "ChIJHUOxfp4VrjsRB7sFxbw9mD4"),
+            ("Manyavar and Mohey - Jaya Nagar 4th Block", "No. 15, 11th Main Road, 4th Block, Jayanagar, Bengaluru, Karnataka 560011",
+             "https://www.manyavar.com/en-in/store-india/karnataka/bengaluru/manyavar-and-mohey-jaya-nagar-VFPLMHVJ",
+             "ChIJPcjOqBQVrjsRWlI66Muy2iU"),
+        ],
+    }
     stores: list[dict[str, Any]] = []
     area_managers: list[dict[str, Any]] = []
     store_specs = []
@@ -44,8 +119,18 @@ def build_demo_tables() -> dict[str, list[dict[str, Any]]]:
                       "Patna": "PAT", "Gaya": "GAY", "Bengaluru": "BLR"}[city]
             tier = ("S++", "S+", "A", "B")[(store_number - 1) % 4]
             store_id = f"{prefix}-{local_index:02}"
+            outlet_name, address, locator_url, maps_place_id = official_outlets[city][local_index - 1]
             stores.append({
                 "store_id": store_id,
+                "store_name": outlet_name,
+                "address": address,
+                "location_source": "Manyavar official store locator",
+                "store_locator_url": locator_url,
+                "google_maps_url": "https://www.google.com/maps/dir/?" + urlencode({
+                    "api": "1",
+                    "destination": address,
+                    "destination_place_id": maps_place_id,
+                }),
                 "city": city,
                 "state": region,
                 "zone": zone,
@@ -61,6 +146,29 @@ def build_demo_tables() -> dict[str, list[dict[str, Any]]]:
     for style_number in range(1, 78):
         category, prefix, base_price = categories[(style_number - 1) % len(categories)]
         style_id = f"{prefix}-{style_number:02}"
+        fabric = {
+            "Sherwani": "Silk Blend",
+            "Indo-Western": "Art Silk",
+            "Kurta Set": "Cotton Silk",
+            "Jacket": "Raw Silk",
+            "Mojari": "Leather",
+            "Safa": "Cotton",
+            "Mala": "Bead",
+            "Stole": "Silk",
+            "Packaging": "Recycled Paper",
+        }[category]
+        cloth_type = {
+            "Sherwani": "Sherwani",
+            "Indo-Western": "Indo-Western",
+            "Kurta Set": "Kurta Set",
+            "Jacket": "Layered Jacket",
+            "Mojari": "Footwear",
+            "Safa": "Headwear",
+            "Mala": "Jewellery",
+            "Stole": "Drape",
+            "Packaging": "Packaging",
+        }[category]
+        colour = ("Ivory", "Maroon", "Teal", "Gold", "Midnight")[style_number % 5]
         for size in sizes:
             sku_id = f"{style_id}-{size}"
             mrp = base_price + (style_number % 9) * 250 if base_price else 0
@@ -70,6 +178,11 @@ def build_demo_tables() -> dict[str, list[dict[str, Any]]]:
                 "style_name": f"Demo {category} Style {style_number:02}",
                 "category": category,
                 "size": size,
+                "cloth_type": cloth_type,
+                "fabric": fabric,
+                "material": fabric,
+                "colour": colour,
+                "care": "Dry clean" if category not in {"Mojari", "Packaging"} else "Wipe clean",
                 "mrp": mrp,
                 "cost_price": round(mrp * 0.38),
                 "launch_date": "2025-08-01",
@@ -163,12 +276,67 @@ def build_demo_tables() -> dict[str, list[dict[str, Any]]]:
                         "selling_price": round(item["mrp"] * (0.9 if week_seed % 4 == 0 else 1)),
                     })
 
+    # Keep one synthetic stale-stock case with proven local demand visible in the demo.
+    rebalance_item = next(
+        item for item in items
+        if item["category"] == "Kurta Set" and item["size"] == "M"
+    )
+    rebalance_sku = rebalance_item["sku_id"]
+    bill_store = {bill["bill_id"]: bill["store_id"] for bill in bills}
+    bill_lines = [
+        line for line in bill_lines
+        if not (line["sku_id"] == rebalance_sku
+                and bill_store.get(line["bill_id"]) == "GAY-02")
+    ]
+    for row in stock_snapshot:
+        if row["sku_id"] != rebalance_sku:
+            continue
+        if row["location_id"] == "GAY-01":
+            row.update(on_hand=0, in_transit=0, oldest_stock_received_on="")
+        elif row["location_id"] == "GAY-02":
+            row.update(on_hand=40, in_transit=0,
+                       oldest_stock_received_on=(as_of - timedelta(days=183)).isoformat())
+        elif row["location_id"] == "WH-KOL":
+            row.update(on_hand=0, in_transit=0)
+
+    week_ends = sorted({row["week_ending"] for row in stock_weekly})
+    stock_weekly = [
+        row for row in stock_weekly
+        if not (row["sku_id"] == rebalance_sku
+                and row["store_id"] in {"GAY-01", "GAY-02"})
+    ]
+    for week_end in week_ends:
+        for store_id, closing_stock in (("GAY-01", 0), ("GAY-02", 40)):
+            stock_weekly.append({
+                "week_ending": week_end,
+                "store_id": store_id,
+                "sku_id": rebalance_sku,
+                "closing_on_hand": closing_stock,
+                "days_in_stock": 7,
+            })
+    for index, week_end in enumerate(week_ends[-6:], start=1):
+        bill_id = f"DEMO-REBAL-{index:02}"
+        bills.append({
+            "bill_id": bill_id,
+            "bill_date": (date.fromisoformat(week_end) - timedelta(days=2)).isoformat(),
+            "store_id": "GAY-01",
+            "salesperson_id": "DEMO-15-01",
+            "customer_id": f"DEMO-C-REBAL-{index:02}",
+        })
+        bill_lines.append({
+            "bill_id": bill_id,
+            "sku_id": rebalance_sku,
+            "qty": 5,
+            "mrp": rebalance_item["mrp"],
+            "selling_price": round(rebalance_item["mrp"] * 0.9),
+        })
+
     for sku_index, item in enumerate(items):
         stock_snapshot.append({
             "as_of_date": as_of.isoformat(),
             "location_id": "WH-KOL",
             "sku_id": item["sku_id"],
-            "on_hand": 8 + sku_index % 17,
+            "on_hand": 0 if item["sku_id"] == rebalance_sku else 8 + sku_index % 17,
             "in_transit": 0,
             "in_transit_arrives_on": "",
             "oldest_stock_received_on": (as_of - timedelta(days=18 + sku_index % 60)).isoformat(),
@@ -215,6 +383,9 @@ def build_demo_tables() -> dict[str, list[dict[str, Any]]]:
         {"expected_date": "2026-11-05", "sku_id": item["sku_id"],
          "qty": 6 + index % 8, "status": "Planned"}
         for index, item in enumerate(items) if index % 7 == 0
+    ]
+    warehouse_inbound = [
+        row for row in warehouse_inbound if row["sku_id"] != rebalance_sku
     ]
     return {
         "stores": stores,

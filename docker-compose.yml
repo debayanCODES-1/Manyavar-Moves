@@ -8,10 +8,13 @@ services:
       DEMO_MODE: ${DEMO_MODE:-true}
       APPROVAL_TOKEN: ${APPROVAL_TOKEN:-}
       APP_SESSION_SECRET: ${APP_SESSION_SECRET:-}
+      API_SHARED_SECRET: ${API_SHARED_SECRET:-}
+      FRONTEND_ORIGINS: ${FRONTEND_ORIGINS:-}
       AUTO_RUN_INTERVAL_HOURS: ${AUTO_RUN_INTERVAL_HOURS:-24}
       AGE_THRESHOLD_DAYS: ${AGE_THRESHOLD_DAYS:-120}
       DATA_DIR: /app/data
       FASTAPI_URL: http://127.0.0.1:8000
+      PUBLIC_API_BASE_URL: ${PUBLIC_API_BASE_URL:-/}
     volumes:
       - stock-mover-data:/app/data
     restart: unless-stopped

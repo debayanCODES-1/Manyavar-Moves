@@ -10,21 +10,28 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Playfair+Display:wght@500;600;700&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="/styles.css">
+    <script src="/runtime-config.js"></script>
   </head>
   <body>
     <div class="app-shell">
       <aside class="sidebar">
         <a class="brand" href="/" aria-label="Manyavar Stock Mover home">
-          <img src="/brand.svg" alt="" width="42" height="42">
-          <span><strong>manyavar</strong><small>STOCK MOVER</small></span>
+          <picture class="brand-picture">
+            <source media="(max-width: 850px)" srcset="https://www.manyavar.com/on/demandware.static/Sites-manyavar-Site/-/default/dw6d92e83c/images/favicons/favicon-196x196.png">
+            <img class="brand-wordmark" src="https://www.manyavar.com/on/demandware.static/Sites-manyavar-Site/-/default/dwe966cb9f/images/Manvayar-Crest-Mohey_Horizontal_logo.png" alt="Official Manyavar and Mohey logo" width="210" height="37" referrerpolicy="no-referrer" onerror="this.onerror=null;this.src='/brand.svg'">
+          </picture>
+          <span><small>STOCK MOVER</small></span>
         </a>
         <div class="workspace-label">MERCHANDISING</div>
         <nav class="primary-nav" aria-label="Main navigation">
+          <span class="nav-group-label">DAILY WORK</span>
           <button class="nav-link active" data-view="overview"><span class="nav-icon">◫</span> Overview</button>
-          <button class="nav-link" data-view="logistics"><span class="nav-icon">⇢</span> Logistics</button>
           <button class="nav-link" data-view="moves"><span class="nav-icon">⇄</span> Move approvals <i id="nav-pending">—</i></button>
+          <button class="nav-link" data-view="logistics"><span class="nav-icon">⇢</span> Logistics</button>
+          <span class="nav-group-label">NETWORK</span>
           <button class="nav-link" data-view="stores"><span class="nav-icon">⌂</span> Store network</button>
           <button class="nav-link" data-view="products"><span class="nav-icon">◇</span> Product intelligence</button>
+          <span class="nav-group-label">ANALYSIS &amp; SETUP</span>
           <button class="nav-link" data-view="bills"><span class="nav-icon">▧</span> Bill analyzer</button>
           <button class="nav-link" data-view="model"><span class="nav-icon">⌁</span> Demand &amp; AI</button>
           <button class="nav-link" data-view="data"><span class="nav-icon">▤</span> Data &amp; rules</button>
@@ -124,7 +131,7 @@
         <section class="view" id="stores-view">
           <div class="page-title-row"><div><span class="eyebrow muted-eyebrow">20 STORES · ONE CONNECTED NETWORK</span><h1>Each store, in its element<span class="heading-period">.</span></h1><p>See stock, capacity and sales together to spot where the network can work harder.</p></div></div>
           <div class="store-summary-strip" id="store-summary-strip"></div>
-          <div class="table-wrap"><table class="data-table"><thead><tr><th>STORE</th><th>GRADE</th><th>AREA MANAGER</th><th>NETWORK STOCK</th><th>CAPACITY</th><th>SALES VALUE</th><th>UNITS SOLD</th><th>BILLS · ALL DATA</th><th>FOOTFALL · 6 MO</th><th>VISIT → BILL</th><th>AVG STAFF PRESENT</th></tr></thead><tbody id="store-table"><tr><td colspan="11" class="empty-cell">Upload your dataset to see store-level performance.</td></tr></tbody></table></div>
+          <div class="table-wrap"><table class="data-table"><thead><tr><th>STORE</th><th>STORE TIER</th><th>SELL-THROUGH GRADE</th><th>AREA MANAGER</th><th>NETWORK STOCK</th><th>CAPACITY</th><th>SALES VALUE</th><th>UNITS SOLD</th><th>BILLS · ALL DATA</th><th>FOOTFALL · 6 MO</th><th>VISIT → BILL</th><th>AVG STAFF PRESENT</th></tr></thead><tbody id="store-table"><tr><td colspan="12" class="empty-cell">Upload your dataset to see store-level performance.</td></tr></tbody></table></div>
           <section class="panel detail-panel" id="store-detail"><div class="empty-note">Choose a store to explore its weekly sales, stock position, best sellers and dormant inventory.</div></section>
         </section>
 
@@ -140,11 +147,11 @@
           </div>
           <div class="product-layout">
             <section class="panel product-table-panel">
-              <div class="table-wrap"><table class="data-table product-table"><thead><tr><th>STYLE / SKU</th><th>CATEGORY</th><th>SIZE</th><th>24-MO UNITS</th><th>12-WK UNITS</th><th>STORE STOCK</th><th>WH STOCK</th><th>BEST STORE</th></tr></thead><tbody id="product-table"><tr><td colspan="8" class="empty-cell">Product intelligence loads after the dataset is ready.</td></tr></tbody></table></div>
+              <div class="table-wrap"><table class="data-table product-table"><thead><tr><th>STYLE / SKU</th><th>CATEGORY</th><th>SIZE</th><th>SELL-THROUGH GRADE</th><th>24-MO UNITS</th><th>12-WK UNITS</th><th>STORE STOCK</th><th>WH STOCK</th><th>BEST STORE</th><th>PLACEMENT LEAD</th></tr></thead><tbody id="product-table"><tr><td colspan="10" class="empty-cell">Product intelligence loads after the dataset is ready.</td></tr></tbody></table></div>
             </section>
             <section class="panel product-detail" id="product-detail"><div class="empty-note">Select a product to see its catalogue description, weekly sales, inventory age, and store-by-store performance.</div></section>
           </div>
-          <p class="data-disclaimer">Product copy uses catalogue fields only. Fabric, colour and care claims are not inferred when absent from source data. “Unsold with stock” requires recorded in-stock exposure during the last 12 weeks.</p>
+          <p class="data-disclaimer">Grades compare velocity within category and size: A = upper quartile, B = median or higher, C = positive but below median, WATCH = zero sales with recorded exposure, UNKNOWN = no recorded exposure. Store tier is a separate source field. Product copy uses catalogue fields only; images are illustrative, not exact SKU photographs.</p>
         </section>
 
         <section class="view" id="bills-view">
@@ -163,6 +170,15 @@
             <article class="panel model-card"><span class="eyebrow muted-eyebrow">DEMAND MODEL</span><div class="model-name" id="model-name">Waiting for data</div><p id="model-description">Availability-adjusted demand, learned from the observed store/SKU selling history.</p><div class="model-facts" id="model-facts"></div></article>
             <article class="panel model-card"><span class="eyebrow muted-eyebrow">ALLOCATION LOGIC</span><div class="model-name" id="optimizer-name">Network allocation</div><p>Scarce stock is assigned to unmet demand while respecting inventory, capacity, display rules, donor cover and manager alert limits.</p><div class="model-facts"><span>OBJECTIVE<strong>Expected gross-margin opportunity</strong></span><span>DECISION<strong>Rule-checked proposal selection</strong></span></div></article>
           </div>
+          <section class="panel science-panel">
+            <div class="panel-heading"><div><span class="eyebrow muted-eyebrow">VISIBLE DECISION MATH</span><h3>Right product · right place · right time</h3></div></div>
+            <div class="science-steps">
+              <div><i>01</i><strong>Store velocity</strong><p>Units sold ÷ recorded in-stock days. Missing exposure stays unknown and is never labelled slow demand.</p></div>
+              <div><i>02</i><strong>Store sell-fit estimate</strong><p>0.48 × direct SKU history + 0.18 × style demand + 0.12 × size/category demand + 0.12 × category share + 0.10 × recent momentum, capped at 96%. This is a ranking heuristic, not a calibrated probability.</p></div>
+              <div><i>03</i><strong>Time-adjusted profit</strong><p>14-day gross-profit estimate = unit margin × min(move quantity, destination velocity × selling days left after transit). Fit and affinity rank proposals; they are not reported as realized profit.</p></div>
+              <div><i>04</i><strong>Hard constraints</strong><p>Minimum display, 30-day donor cover, S++ protection, in-transit stock, warehouse supply, capacity and manager alert limits run before a move is selectable.</p></div>
+            </div>
+          </section>
           <section class="panel science-panel"><div class="panel-heading"><div><span class="eyebrow muted-eyebrow">THE METHOD, IN PLAIN LANGUAGE</span><h3>From velocity to a move</h3></div></div>
             <div class="science-steps"><div><i>01</i><strong>Learn what sells</strong><p>Fit a pooled Tweedie model when LightGBM is available, correcting observed units by in-stock days. Festival, wedding, store tier and product features are included.</p></div><div><i>02</i><strong>Allocate with purpose</strong><p>Use expected margin and urgency to prioritize shortages; a binary MILP selects among safe proposals when SciPy is installed.</p></div><div><i>03</i><strong>Prove each rule</strong><p>Python checks the proposed moves against display minimums, protected S++ styles, 30-day donor cover, in-transit stock and store capacity.</p></div><div><i>04</i><strong>Keep a human in charge</strong><p>Gemini can answer questions about computed results; it never calculates stock, edits a move, or approves one on a person's behalf.</p></div></div>
           </section>
@@ -176,6 +192,7 @@
               <div class="dropzone" id="dropzone"><span class="drop-icon">▤</span><strong>Drop your workbook here</strong><span>Excel workbook (.xlsx) or zipped CSV tables · up to 200 MB</span><button class="button button-rust" id="choose-file">Browse files</button><input id="file-input" type="file" accept=".xlsx,.zip" hidden></div>
               <div class="upload-progress" id="upload-progress" hidden><span class="spinner"></span><span id="upload-message">Analysing workbook…</span></div>
               <div class="data-source" id="data-source"><span class="source-dot"></span><span id="data-source-name">No dataset loaded</span></div>
+              <div class="integration-status"><strong>DIRECT MANYAVAR SYSTEM CONNECTION</strong><span>Not configured. Workbook / CSV upload is active; a future ERP or WMS connector can be attached through the documented API.</span></div>
             </section>
             <section class="panel guide-panel"><span class="eyebrow muted-eyebrow">WHAT THE ENGINE NEEDS</span><h3>Every table has a part to play.</h3><div class="table-guide">
               <div><b>NETWORK</b><span>stores · area_managers · items</span></div><div><b>SELL-THROUGH</b><span>bills · bill_lines · stock_weekly</span></div><div><b>ON-HAND</b><span>stock_snapshot · warehouse_inbound</span></div><div><b>GUARDRAILS</b><span>min_display · lead_times · flagship_protected</span></div><div><b>SEASONALITY</b><span>calendar (festivals and wedding dates)</span></div>
@@ -209,15 +226,13 @@
         <button class="button button-rust" type="submit">Enter workspace <span>→</span></button>
         </div>
         <section id="face-demo-panel" class="face-demo-panel" hidden>
-          <span class="eyebrow muted-eyebrow">LOCAL DEMO CHECK · NOT PRODUCTION AUTH</span>
-          <p>With your consent, this tab captures a temporary face template and compares it locally. Images never leave this browser. The first face enrolls this demo tab; this does not prove identity or secure the role.</p>
-          <label class="face-consent"><input id="face-consent" type="checkbox"> I consent to the local demo face check.</label>
-          <video id="face-video" autoplay muted playsinline hidden aria-label="Local face matching camera preview"></video>
-          <div id="face-status" class="face-status" role="status" aria-live="polite">Start the camera check when ready.</div>
+          <span class="eyebrow muted-eyebrow">CAMERA LOGIN DEMO · NOT IDENTITY AUTHENTICATION</span>
+          <p>Choose “Open camera &amp; enter” to start the camera preview. This demo approves automatically; it does not detect or compare faces, and it does not save images.</p>
+          <video id="face-video" autoplay muted playsinline hidden aria-label="Camera preview for the authentication demo"></video>
+          <div id="face-status" class="face-status" role="status" aria-live="polite">Open the camera to complete the demo login.</div>
           <div class="face-actions">
-            <button id="face-start" class="button button-rust" type="button">Start local check</button>
-            <button id="face-skip" class="button button-quiet" type="button">Continue without a face match</button>
-            <button id="face-clear" class="button button-quiet" type="button">Clear this tab’s template</button>
+            <button id="face-start" class="button button-rust" type="button">Open camera &amp; enter</button>
+            <button id="face-skip" class="button button-quiet" type="button">Continue without camera</button>
             <button id="face-sign-out" class="button button-quiet" type="button">Sign out</button>
           </div>
         </section>
@@ -227,7 +242,6 @@
       <div class="loader-orbit"><span></span><i></i></div><strong>Setting the stockroom.</strong><span>Connecting sales, inventory and store rules…</span>
     </div>
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
-    <script src="/vendor/face-api.js"></script>
     <script type="module" src="/app.js"></script>
   </body>
 </html>

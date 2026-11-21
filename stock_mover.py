@@ -225,12 +225,23 @@ def build_recommendations(tables: dict[str, list[dict[str, Any]]],
             bill_dates[bill_id] = (str(field(bill, "store_id")), bill_date)
 
     sold = defaultdict(float)
+    sold_last_14 = defaultdict(float)
+    sold_previous_14 = defaultdict(float)
+    last_sale_date = {}
     for line in tables["bill_lines"]:
         bill_id = str(field(line, "bill_id", default=""))
         if bill_id in bill_dates:
-            store_id, _ = bill_dates[bill_id]
+            store_id, bill_date = bill_dates[bill_id]
             sku_id = str(field(line, "sku_id", default=""))
-            sold[store_id, sku_id] += as_number(field(line, "qty"))
+            qty = as_number(field(line, "qty"))
+            sold[store_id, sku_id] += qty
+            if qty > 0:
+                last_sale_date[store_id, sku_id] = max(
+                    bill_date, last_sale_date.get((store_id, sku_id), date.min))
+            if bill_date >= sales_end - timedelta(days=13):
+                sold_last_14[store_id, sku_id] += qty
+            elif bill_date >= sales_end - timedelta(days=27):
+                sold_previous_14[store_id, sku_id] += qty
 
     in_stock_days = defaultdict(float)
     for row in tables["stock_weekly"]:
@@ -253,6 +264,128 @@ def build_recommendations(tables: dict[str, list[dict[str, Any]]],
         for pair, rate in velocity_override.items():
             if pair in velocity and rate >= 0:
                 velocity[pair] = rate
+
+    # Store-fit signals: direct SKU evidence is strongest, followed by the same
+    # style, size/category, and the store's own fashion momentum.
+    style_sold = defaultdict(float)
+    category_sold = defaultdict(float)
+    size_sold = defaultdict(float)
+    style_sold_recent = defaultdict(float)
+    category_sold_recent = defaultdict(float)
+    size_sold_recent = defaultdict(float)
+    style_exposure = defaultdict(float)
+    category_size_exposure = defaultdict(float)
+    material_exposure = defaultdict(float)
+    material_sold = defaultdict(float)
+    category_exposure = defaultdict(float)
+    for (store_id, sku_id), qty in sold.items():
+        item = items.get(sku_id, {})
+        style_id = str(field(item, "style_id", default=""))
+        category = display_category(field(item, "category", default=""))
+        size = str(field(item, "size", default=""))
+        style_sold[store_id, style_id] += qty
+        category_sold[store_id, category] += qty
+        size_sold[store_id, category, size] += qty
+    for (store_id, sku_id), qty in sold_last_14.items():
+        item = items.get(sku_id, {})
+        style_id = str(field(item, "style_id", default=""))
+        category = display_category(field(item, "category", default=""))
+        size = str(field(item, "size", default=""))
+        style_sold_recent[store_id, style_id] += qty
+        category_sold_recent[store_id, category] += qty
+        size_sold_recent[store_id, category, size] += qty
+
+    def product_fit_key(item: dict[str, Any]) -> tuple[str, str, str, str]:
+        return (
+            display_category(field(item, "category", default="")).casefold(),
+            str(field(item, "size", default="")).casefold(),
+            str(field(item, "material", "fabric", default="")).strip().casefold(),
+            str(field(item, "cloth_type", default="")).strip().casefold(),
+        )
+
+    for (store_id, sku_id), qty in sold.items():
+        category, size, material, cloth = product_fit_key(items.get(sku_id, {}))
+        if material or cloth:
+            material_sold[store_id, category, size, material, cloth] += qty
+
+    for store_id in stores:
+        for sku_id, item in items.items():
+            exposure = in_stock_days[store_id, sku_id]
+            style = str(field(item, "style_id", default=""))
+            category, size, material, cloth = product_fit_key(item)
+            style_exposure[store_id, style] += exposure
+            category_size_exposure[store_id, category, size] += exposure
+            category_exposure[store_id, category] += exposure
+            if material or cloth:
+                material_exposure[store_id, category, size, material, cloth] += exposure
+
+    def placement_rate(store_id: str, sku_id: str) -> tuple[float, str]:
+        direct_rate = velocity[store_id, sku_id]
+        if direct_rate > 0:
+            return direct_rate, "same-SKU sales/forecast"
+        item = items[sku_id]
+        style = str(field(item, "style_id", default=""))
+        category, size, material, cloth = product_fit_key(item)
+        style_rate = (
+            style_sold[store_id, style] / style_exposure[store_id, style]
+            if style_exposure[store_id, style] else 0.0
+        )
+        material_key = store_id, category, size, material, cloth
+        material_rate = (
+            material_sold[material_key] / material_exposure[material_key]
+            if (material or cloth) and material_exposure[material_key] else 0.0
+        )
+        size_rate = (
+            size_sold[store_id, category, size]
+            / category_size_exposure[store_id, category, size]
+            if category_size_exposure[store_id, category, size] else 0.0
+        )
+        category_rate = (
+            category_sold[store_id, category] / category_exposure[store_id, category]
+            if category_exposure[store_id, category] else 0.0
+        )
+        if material_rate > 0 and style_rate > 0:
+            return 0.7 * material_rate + 0.3 * style_rate, "matching material/cloth and style-family sales"
+        if material_rate > 0:
+            return material_rate, "matching material/cloth and size sales"
+        if style_rate > 0:
+            return style_rate, "same style-family sales across sizes"
+        if size_rate > 0:
+            return size_rate, "same category and size sales"
+        if category_rate > 0:
+            return 0.35 * category_rate, "category-only sales (low-confidence proxy)"
+        return 0.0, "no comparable in-stock sales evidence"
+
+    placement_velocity = {
+        (store_id, sku_id): placement_rate(store_id, sku_id)[0]
+        for store_id in stores for sku_id in items
+    }
+
+    store_category_totals = defaultdict(float)
+    for (store_id, category), qty in category_sold.items():
+        store_category_totals[store_id] += qty
+
+    upcoming_window = as_of + timedelta(days=30)
+    store_seasonal_sales = {}
+    for row in tables.get("calendar", []):
+        event_date = as_date(field(row, "date"))
+        if event_date is None or not (as_of <= event_date <= upcoming_window):
+            continue
+        state = str(field(row, "state", default="")).casefold()
+        festival = str(field(row, "festival", default="")).casefold()
+        wedding = as_number(field(row, "is_wedding_date")) > 0
+        if not state:
+            continue
+        for store_id, store in stores.items():
+            if str(field(store, "state", default="")).casefold() != state:
+                continue
+            store_seasonal_sales[store_id] = max(
+                store_seasonal_sales.get(store_id, 0),
+                1.0 if wedding or any(token in festival
+                                     for token in ("diwali", "durga", "navratri",
+                                                   "wedding", "vivah"))
+                else 0.35,
+            )
 
     # Transit is included in projected stock/cover, but only on-hand units can be dispatched.
     on_hand = defaultdict(float)
@@ -329,6 +462,62 @@ def build_recommendations(tables: dict[str, list[dict[str, Any]]],
         tier = str(field(stores[store_id], "tier", default=""))
         return minimums.get((tier, category), 0)
 
+    def store_fit(store_id: str, sku_id: str) -> tuple[float, float, str]:
+        item = items[sku_id]
+        category = display_category(field(item, "category", default=""))
+        style_id = str(field(item, "style_id", default=""))
+        size = str(field(item, "size", default=""))
+        direct_units = sold[store_id, sku_id]
+        style_units = style_sold[store_id, style_id]
+        size_units = size_sold[store_id, category, size]
+        category_units = category_sold[store_id, category]
+        store_units = store_category_totals[store_id]
+        recent_direct = sold_last_14[store_id, sku_id]
+        previous_direct = sold_previous_14[store_id, sku_id]
+        momentum = (
+            (recent_direct - previous_direct) / max(1.0, previous_direct)
+            if previous_direct else (0.35 if recent_direct else 0.0)
+        )
+        category_share = category_units / store_units if store_units > 0 else 0.0
+        direct_signal = min(1.0, direct_units / 20.0)
+        style_signal = min(1.0, style_units / 60.0)
+        size_signal = min(1.0, size_units / 35.0)
+        season_signal = store_seasonal_sales.get(store_id, 0.0)
+        category_lift = 1.0
+        if season_signal:
+            category_lift = 1.25 if category.casefold() in {
+                "sherwani", "indo-western", "kurta set", "jacket"
+            } else 1.05
+
+        evidence = (
+            0.48 * direct_signal
+            + 0.18 * style_signal
+            + 0.12 * size_signal
+            + 0.12 * category_share
+            + 0.10 * min(1.0, max(0.0, 0.5 + momentum))
+        )
+        evidence *= category_lift
+        exposure_days = in_stock_days[store_id, sku_id]
+        if exposure_days <= 0 and direct_units <= 0:
+            evidence *= 0.35
+        probability = max(0.03, min(0.96, evidence))
+        affinity = min(100.0, probability * 100.0)
+
+        reasons = []
+        if direct_units > 0:
+            reasons.append(f"{int(direct_units)} prior units")
+        if style_units > 0:
+            reasons.append("style-family demand")
+        if size_units > 0:
+            reasons.append("size/category demand")
+        if season_signal:
+            reasons.append("upcoming wedding/festival window")
+        if momentum > 0.15:
+            reasons.append("recent upward trend")
+        if not reasons:
+            reasons.append("no confirmed recent SKU demand")
+        return probability, affinity, "; ".join(reasons)
+
     capacity = {
         store_id: max(0, int(as_number(field(store, "stock_capacity_units", "capacity_units")) -
                              sum(stock[store_id, sku] for sku in items)))
@@ -341,10 +530,12 @@ def build_recommendations(tables: dict[str, list[dict[str, Any]]],
             if as_number(field(item, "is_packaging")):
                 continue
             category = display_category(field(item, "category", default=""))
-            rate = velocity[store_id, sku_id]
+            rate = placement_velocity[store_id, sku_id]
             current = stock[store_id, sku_id]
             lead = lead_days(WAREHOUSE, store_id, wh_to_store_days)
             target = int((rate * (lead + DEFAULT_MIN_COVER_DAYS)) + 0.999)
+            sell_probability, _, _ = store_fit(store_id, sku_id)
+            target = int((target * (0.75 + 0.25 * sell_probability)) + 0.999)
             sku_need = max(0, target - int(current))
             needs[store_id, sku_id] = sku_need
 
@@ -358,7 +549,7 @@ def build_recommendations(tables: dict[str, list[dict[str, Any]]],
                 (sku for sku, item in items.items()
                  if display_category(field(item, "category", default="")) == category
                  and not as_number(field(item, "is_packaging"))),
-                key=lambda sku: velocity[store_id, sku], reverse=True)
+                key=lambda sku: placement_velocity[store_id, sku], reverse=True)
             for sku_id in candidates:
                 if floor_gap <= 0:
                     break
@@ -368,34 +559,131 @@ def build_recommendations(tables: dict[str, list[dict[str, Any]]],
 
     recommendations: list[dict[str, Any]] = []
     def priority(store_id: str, sku_id: str, lead: int) -> tuple[float, float, str]:
-        rate = velocity[store_id, sku_id]
+        rate = placement_velocity[store_id, sku_id]
         cover = stock[store_id, sku_id] / rate if rate > 0 else float("inf")
         urgency = rate / max(1.0, stock[store_id, sku_id] + 1)
-        return (0 if cover <= lead else 1, -urgency, store_id)
+        sell_probability, affinity, _ = store_fit(store_id, sku_id)
+        commercial_score = urgency * (0.5 + sell_probability) + affinity / 1000.0
+        return (0 if cover <= lead else 1, -commercial_score, store_id)
 
     def add_move(kind: str, source: str, target: str, sku_id: str, qty: int,
                  lead: int, reason: str, cover_after: float | None = None,
                  dispatch: date | None = None, donor_velocity: float | None = None,
-                 age_days: int | None = None) -> None:
+                 age_days: int | None = None, stale_no_demand: bool = False) -> None:
         dispatch = dispatch or as_of
         arrival = dispatch + timedelta(days=lead)
         move_value_mrp = qty * as_number(field(items[sku_id], "mrp"))
+        sell_probability, affinity, fit_reason = (
+            store_fit(target, sku_id) if target in stores
+            else (0.0, 0.0, "Age-recovery return to warehouse")
+        )
+        target_store = stores.get(target)
+        target_capacity = int(as_number(field(target_store, "stock_capacity_units",
+                                            "capacity_units"))) if target_store else 0
+        capacity_remaining = max(0, int(capacity.get(target, 0))) if target in stores else 0
+        capacity_pct = round(
+            100 * (target_capacity - capacity_remaining) / target_capacity, 1
+        ) if target_capacity else 0
+        target_velocity = placement_velocity.get((target, sku_id), 0)
+        horizon_units = min(qty, max(0.0, target_velocity)
+                           * max(1.0, 14.0 - lead))
+        _, demand_basis = placement_rate(target, sku_id) if target in stores else (
+            0.0, "Age-recovery return to warehouse")
+        move_category = display_category(field(items[sku_id], "category", default=""))
+        move_style = str(field(items[sku_id], "style_id", default=""))
+        validation_checks = []
+        if target in stores:
+            validation_checks.append({
+                "rule": "Store capacity",
+                "status": "pass" if capacity_remaining >= qty else "fail",
+                "detail": f"{capacity_remaining} units free before this move; {qty} requested.",
+            })
+            validation_checks.append({
+                "rule": "Transit stock",
+                "status": "pass",
+                "detail": "Existing in-transit stock is included in projected destination stock.",
+            })
+        else:
+            validation_checks.append({
+                "rule": "Store capacity",
+                "status": "not_applicable",
+                "detail": "Destination is the warehouse.",
+            })
+        if source in stores:
+            remaining_category_units = category_stock[source, move_category] - qty
+            minimum_display = category_floor(source, move_category)
+            validation_checks.append({
+                "rule": "Minimum display",
+                "status": "pass" if remaining_category_units >= minimum_display else "fail",
+                "detail": (
+                    f"{remaining_category_units} {move_category} units remain; "
+                    f"store minimum is {minimum_display}."
+                ),
+            })
+            is_protected = (source, move_style) in protected
+            validation_checks.append({
+                "rule": "S++ style protection",
+                "status": "fail" if is_protected else "pass",
+                "detail": (
+                    "This style is on the source store's protected list."
+                    if is_protected else "Source style is not on the protected list."
+                ),
+            })
+            if donor_velocity is not None and donor_velocity > 0 and cover_after is not None:
+                cover_status = "pass" if cover_after >= DEFAULT_MIN_COVER_DAYS else "fail"
+                cover_detail = (
+                    f"{cover_after:.1f} days remain; minimum is {DEFAULT_MIN_COVER_DAYS}."
+                )
+            elif stale_no_demand:
+                cover_status = "evidence"
+                cover_detail = (
+                    "Cover is undefined because no donor sales rate is recorded; transfer is "
+                    "limited to exposure-confirmed, 70+ day no-demand stock."
+                )
+            else:
+                cover_status = "not_applicable"
+                cover_detail = "No donor selling rate is available to calculate cover."
+            validation_checks.append({
+                "rule": "Donor cover",
+                "status": cover_status,
+                "detail": cover_detail,
+            })
+        validation_checks.append({
+            "rule": "Route lead time",
+            "status": "pass" if lead >= 0 else "fail",
+            "detail": f"Configured transit is {lead} day(s); arrival is {arrival.isoformat()}.",
+        })
         recommendations.append({
-            "priority": "P1" if velocity.get((target, sku_id), 0) > 0 and
-                        stock[target, sku_id] / max(velocity[target, sku_id], 0.0001) <= lead else "P2",
+            "priority": "P1" if target_velocity > 0 and
+                        stock[target, sku_id] / max(target_velocity, 0.0001) <= lead else "P2",
             "move_type": kind, "from_location": source, "to_location": target,
             "sku_id": sku_id, "style_id": str(field(items[sku_id], "style_id", default="")),
             "category": str(field(items[sku_id], "category", default="")),
             "qty": int(qty), "dispatch_date": dispatch.isoformat(),
             "arrival_date": arrival.isoformat(),
-            "daily_velocity": round(velocity.get((target, sku_id), 0), 3),
+            "lead_time_days": lead,
+            "daily_velocity": round(target_velocity, 3),
+            "direct_sku_velocity": round(velocity.get((target, sku_id), 0), 3),
+            "demand_basis": demand_basis,
             "donor_daily_velocity": round(donor_velocity, 3) if donor_velocity is not None else "",
-            "donor_cover_after_days": "" if cover_after is None else round(cover_after, 1),
+            "donor_cover_after_days": round(cover_after, 1) if cover_after is not None else "",
+            "stale_no_demand_redeployment": stale_no_demand,
             "stock_age_days": age_days if age_days is not None else "",
             "move_value_mrp": round(move_value_mrp, 2),
             "approval_threshold_mrp": approval_limit,
             "requires_human_approval": move_value_mrp > approval_limit,
-            "reason": reason,
+            "sell_probability_pct": round(sell_probability * 100, 1),
+            "store_affinity_score": round(affinity, 1),
+            "store_fit_reason": fit_reason,
+            "target_capacity_remaining_units": capacity_remaining,
+            "target_capacity_utilization_pct": capacity_pct,
+            "estimated_sell_through_units_14d": round(horizon_units, 2),
+            "validation_checks": validation_checks,
+            "reason": (
+                f"{reason} Store fit: {fit_reason}; "
+                f"sell-fit estimate {round(sell_probability * 100, 1)}% "
+                "(heuristic, not a calibrated probability)."
+            ) if target in stores else reason,
         })
 
     # Allocate scarce warehouse units to the most urgent unmet demand first.
@@ -447,23 +735,42 @@ def build_recommendations(tables: dict[str, list[dict[str, Any]]],
                     continue
                 rate = velocity[donor, sku_id]
                 projected = stock[donor, sku_id]
-                min_safe = int(rate * DEFAULT_MIN_COVER_DAYS + 0.999) if rate > 0 else int(projected)
+                latest_sale = last_sale_date.get((donor, sku_id))
+                sale_stale_days = (sales_end - latest_sale).days if latest_sale else None
+                age = ((as_of - oldest[(donor, sku_id)]).days
+                       if (donor, sku_id) in oldest else None)
+                stale_no_demand = (
+                    in_stock_days[donor, sku_id] >= 7
+                    and (
+                        sale_stale_days is not None and sale_stale_days >= 70
+                        or latest_sale is None and age is not None and age >= 70
+                    )
+                )
+                min_safe = (
+                    int(rate * DEFAULT_MIN_COVER_DAYS + 0.999)
+                    if rate > 0 and not stale_no_demand
+                    else 0 if stale_no_demand
+                    else int(projected)
+                )
                 category_excess = int(category_stock[donor, category]) - category_floor(donor, category)
                 safe_qty = min(int(on_hand[donor, sku_id]), int(projected) - min_safe, category_excess)
                 qty = min(needs[target, sku_id], safe_qty, capacity[target])
                 if qty <= 0:
                     continue
-                after = (projected - qty) / rate if rate > 0 else float("inf")
-                if after < DEFAULT_MIN_COVER_DAYS:
+                after = (projected - qty) / rate if rate > 0 else None
+                if after is not None and after < DEFAULT_MIN_COVER_DAYS and not stale_no_demand:
                     continue
-                age = (as_of - oldest[(donor, sku_id)]).days if (donor, sku_id) in oldest else None
                 age_note = f"; oldest stock is {age} days old" if age is not None else ""
                 donor_lead = lead_days(donor, target, store_to_store_days)
+                target_rate = placement_velocity[target, sku_id]
+                donor_cover = f"{round(after, 1)} days of cover" if rate > 0 else "no proven donor demand"
+                stale_note = "; 70+ day no-demand stock is being redeployed" if stale_no_demand else ""
                 add_move("STORE_TO_STORE", donor, target, sku_id, qty, donor_lead,
-                         f"Move surplus to a faster-selling store ({round(velocity[target, sku_id], 2)} "
-                         f"vs {round(rate, 2)} units/day){age_note}; donor retains "
-                         f"{round(after, 1)} days of cover and its category display floor.",
-                         cover_after=after, donor_velocity=rate, age_days=age)
+                         f"Move stock to a better-fit store ({round(target_rate, 3)} vs "
+                         f"{round(rate, 3)} units/day){age_note}{stale_note}; donor retains "
+                         f"{donor_cover} and its category display floor.",
+                         cover_after=after, donor_velocity=rate, age_days=age,
+                         stale_no_demand=stale_no_demand)
                 stock[donor, sku_id] -= qty
                 category_stock[donor, category] -= qty
                 on_hand[donor, sku_id] -= qty
@@ -578,7 +885,8 @@ def validate_recommendations(moves: list[dict[str, Any]], stores: dict[str, dict
             if projected[source, sku] < -1e-8:
                 raise ValueError(f"Store {source} would dispatch more {sku} than projected stock.")
             # The engine records cover after each donor allocation; enforce the published hard limit.
-            if float(move["donor_cover_after_days"]) < DEFAULT_MIN_COVER_DAYS:
+            cover_after = as_number(move.get("donor_cover_after_days"), float("inf"))
+            if cover_after < DEFAULT_MIN_COVER_DAYS:
                 raise ValueError(f"Store-to-store move leaves donor under 30 days of cover: {sku}")
         if source in stores:
             tier = str(field(stores[source], "tier", default=""))

@@ -1,0 +1,35 @@
+services:
+  - type: web
+    name: manyavar-stock-mover
+    runtime: docker
+    plan: starter
+    healthCheckPath: /health
+    disk:
+      name: manyavar-stock-mover-data
+      mountPath: /app/data
+      sizeGB: 1
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DEMO_MODE
+        value: "false"
+      - key: DATA_DIR
+        value: /app/data
+      - key: FASTAPI_URL
+        value: http://127.0.0.1:8000
+      - key: PUBLIC_API_BASE_URL
+        value: https://manyavar-stock-mover.onrender.com
+      - key: AUTO_RUN_INTERVAL_HOURS
+        value: "24"
+      - key: AGE_THRESHOLD_DAYS
+        value: "120"
+      - key: APP_SESSION_SECRET
+        generateValue: true
+      - key: API_SHARED_SECRET
+        generateValue: true
+      - key: APPROVAL_TOKEN
+        sync: false
+      - key: FRONTEND_ORIGINS
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
