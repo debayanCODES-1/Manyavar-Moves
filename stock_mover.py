@@ -88,7 +88,7 @@ def load_tables(source: Path) -> dict[str, list[dict[str, Any]]]:
 
 def require_tables(tables: dict[str, list[dict[str, Any]]]) -> None:
     required = ("stores", "area_managers", "items", "bills", "bill_lines", "stock_snapshot",
-                "stock_weekly", "min_display", "lead_times", "flagship_protected")
+                "stock_weekly", "rules", "min_display", "lead_times", "flagship_protected")
     missing = [name for name in required if name not in tables]
     if missing:
         raise ValueError("Missing required table(s): " + ", ".join(missing))
@@ -114,18 +114,46 @@ def min_display_by_tier(rows: list[dict[str, Any]]) -> dict[tuple[str, str], int
     return result
 
 
+def display_category(value: Any) -> str:
+    category = str(value or "").strip()
+    if category.casefold() in {"safa", "mala", "stole"}:
+        return "Accessories (Safa/Mala/Stole)"
+    return category
+
+
+def approval_threshold_from_rules(rows: list[dict[str, Any]]) -> int:
+    for row in rows:
+        rule = str(field(row, "rule", "name", default="")).casefold()
+        detail = str(field(row, "detail", "description", default=""))
+        if "approval" not in rule:
+            continue
+        match = re.search(r"(?:rs\.?|₹)\s*([\d,]+)", detail, re.IGNORECASE)
+        if match:
+            return int(match.group(1).replace(",", ""))
+    return 100_000
+
+
 def get_lead_days(rows: list[dict[str, Any]], source_type: str, target_type: str) -> int:
     for row in rows:
-        origin = key(field(row, "from", "from_type", "source", "source_type", "origin_type", default=""))
-        destination = key(field(row, "to", "to_type", "destination", "destination_type", "target_type", default=""))
-        if origin and destination and origin in key(source_type) and destination in key(target_type):
-            days = field(row, "lead_time_days", "lead_days", "days", "lead_time")
+        origin = key(field(row, "from", "from_type", "from_location_type",
+                           "source", "source_type", "origin_type", default=""))
+        destination = key(field(row, "to", "to_type", "to_location_type",
+                                "destination", "destination_type", "target_type", default=""))
+        route = key(field(row, "move_type", "movement_type", "route", "movement", "name", default=""))
+        endpoints_match = (origin and destination
+                           and key(source_type) in origin and key(target_type) in destination)
+        route_matches = (route and key(source_type) in route and key(target_type) in route)
+        if endpoints_match or route_matches:
+            days = field(row, "lead_time_days", "lead_days", "days", "lead_time", "value")
             return max(0, int(as_number(days)))
     raise ValueError(f"No lead-time rule found for {source_type} -> {target_type}.")
 
 
 def build_recommendations(tables: dict[str, list[dict[str, Any]]],
-                          age_threshold: int = DEFAULT_AGE_DAYS) -> list[dict[str, Any]]:
+                          age_threshold: int = DEFAULT_AGE_DAYS,
+                          velocity_override: dict[tuple[str, str], float] | None = None,
+                          lead_time_overrides: dict[tuple[str, str], int] | None = None
+                          ) -> list[dict[str, Any]]:
     require_tables(tables)
     stores = {str(r["store_id"]): r for r in tables["stores"]}
     items = {str(r["sku_id"]): r for r in tables["items"]}
@@ -170,6 +198,10 @@ def build_recommendations(tables: dict[str, list[dict[str, Any]]],
                 velocity[store_id, sku_id] = quantity / observation_days
             else:
                 velocity[store_id, sku_id] = 0.0
+    if velocity_override is not None:
+        for pair, rate in velocity_override.items():
+            if pair in velocity and rate >= 0:
+                velocity[pair] = rate
 
     # Transit is included in projected stock/cover, but only on-hand units can be dispatched.
     on_hand = defaultdict(float)
@@ -210,9 +242,10 @@ def build_recommendations(tables: dict[str, list[dict[str, Any]]],
         (str(field(r, "store_id")), str(field(r, "style_id")))
         for r in tables["flagship_protected"]
     }
+    approval_limit = approval_threshold_from_rules(tables["rules"])
     minimums = min_display_by_tier(tables["min_display"])
     merchandise_categories = {
-        str(field(item, "category", default="")) for item in items.values()
+        display_category(field(item, "category", default="")) for item in items.values()
         if not as_number(field(item, "is_packaging"))
     }
     tiers = {str(field(store, "tier", default="")) for store in stores.values()}
@@ -223,7 +256,13 @@ def build_recommendations(tables: dict[str, list[dict[str, Any]]],
             f"{tier}/{category}" for tier, category in missing_floors))
     wh_to_store_days = get_lead_days(tables["lead_times"], "warehouse", "store")
     store_to_store_days = get_lead_days(tables["lead_times"], "store", "store")
-    store_to_wh_days = get_lead_days(tables["lead_times"], "store", "warehouse")
+    try:
+        store_to_wh_days = get_lead_days(tables["lead_times"], "store", "warehouse")
+    except ValueError:
+        store_to_wh_days = wh_to_store_days
+
+    def lead_days(source: str, target: str, default: int) -> int:
+        return (lead_time_overrides or {}).get((source, target), default)
 
     stock = defaultdict(float)
     for store_id in stores:
@@ -233,7 +272,7 @@ def build_recommendations(tables: dict[str, list[dict[str, Any]]],
     category_stock = defaultdict(float)
     for (location, sku_id), units in stock.items():
         item = items.get(sku_id, {})
-        category_stock[location, str(field(item, "category", default=""))] += units
+        category_stock[location, display_category(field(item, "category", default=""))] += units
 
     def category_floor(store_id: str, category: str) -> int:
         tier = str(field(stores[store_id], "tier", default=""))
@@ -250,23 +289,23 @@ def build_recommendations(tables: dict[str, list[dict[str, Any]]],
         for sku_id, item in items.items():
             if as_number(field(item, "is_packaging")):
                 continue
-            category = str(field(item, "category", default=""))
+            category = display_category(field(item, "category", default=""))
             rate = velocity[store_id, sku_id]
             current = stock[store_id, sku_id]
-            lead = wh_to_store_days
+            lead = lead_days(WAREHOUSE, store_id, wh_to_store_days)
             target = int((rate * (lead + DEFAULT_MIN_COVER_DAYS)) + 0.999)
             sku_need = max(0, target - int(current))
             needs[store_id, sku_id] = sku_need
 
         # A category display floor is spread over its selling SKUs, fastest first.
-        categories = {str(field(i, "category", default="")) for i in items.values()
+        categories = {display_category(field(i, "category", default="")) for i in items.values()
                       if not as_number(field(i, "is_packaging"))}
         for category in categories:
             floor_gap = max(0, category_floor(store_id, category) -
                             int(category_stock[store_id, category]))
             candidates = sorted(
                 (sku for sku, item in items.items()
-                 if str(field(item, "category", default="")) == category
+                 if display_category(field(item, "category", default="")) == category
                  and not as_number(field(item, "is_packaging"))),
                 key=lambda sku: velocity[store_id, sku], reverse=True)
             for sku_id in candidates:
@@ -285,9 +324,11 @@ def build_recommendations(tables: dict[str, list[dict[str, Any]]],
 
     def add_move(kind: str, source: str, target: str, sku_id: str, qty: int,
                  lead: int, reason: str, cover_after: float | None = None,
-                 dispatch: date | None = None) -> None:
+                 dispatch: date | None = None, donor_velocity: float | None = None,
+                 age_days: int | None = None) -> None:
         dispatch = dispatch or as_of
         arrival = dispatch + timedelta(days=lead)
+        move_value_mrp = qty * as_number(field(items[sku_id], "mrp"))
         recommendations.append({
             "priority": "P1" if velocity.get((target, sku_id), 0) > 0 and
                         stock[target, sku_id] / max(velocity[target, sku_id], 0.0001) <= lead else "P2",
@@ -297,18 +338,24 @@ def build_recommendations(tables: dict[str, list[dict[str, Any]]],
             "qty": int(qty), "dispatch_date": dispatch.isoformat(),
             "arrival_date": arrival.isoformat(),
             "daily_velocity": round(velocity.get((target, sku_id), 0), 3),
+            "donor_daily_velocity": round(donor_velocity, 3) if donor_velocity is not None else "",
             "donor_cover_after_days": "" if cover_after is None else round(cover_after, 1),
+            "stock_age_days": age_days if age_days is not None else "",
+            "move_value_mrp": round(move_value_mrp, 2),
+            "approval_threshold_mrp": approval_limit,
+            "requires_human_approval": move_value_mrp > approval_limit,
             "reason": reason,
         })
 
     # Allocate scarce warehouse units to the most urgent unmet demand first.
     for sku_id in items:
-        category = str(field(items[sku_id], "category", default=""))
+        category = display_category(field(items[sku_id], "category", default=""))
         if as_number(field(items[sku_id], "is_packaging")):
             continue
         recipients = sorted(
             (store_id for store_id in stores if needs.get((store_id, sku_id), 0) > 0),
-            key=lambda store_id: priority(store_id, sku_id, wh_to_store_days))
+            key=lambda store_id: priority(
+                store_id, sku_id, lead_days(WAREHOUSE, store_id, wh_to_store_days)))
         for store_id in recipients:
             if capacity[store_id] <= 0:
                 continue
@@ -318,7 +365,8 @@ def build_recommendations(tables: dict[str, list[dict[str, Any]]],
                 qty = min(int(needs[store_id, sku_id]), int(available_units), capacity[store_id])
                 if qty <= 0:
                     continue
-                add_move("WAREHOUSE_TO_STORE", WAREHOUSE, store_id, sku_id, qty, wh_to_store_days,
+                recipient_lead = lead_days(WAREHOUSE, store_id, wh_to_store_days)
+                add_move("WAREHOUSE_TO_STORE", WAREHOUSE, store_id, sku_id, qty, recipient_lead,
                          f"Cover {round(stock[store_id, sku_id] / velocity[store_id, sku_id], 1) if velocity[store_id, sku_id] else 'unknown'} "
                          f"days against {round(velocity[store_id, sku_id], 2)} units/day; highest-priority "
                          f"unmet {category} demand within store capacity.",
@@ -333,7 +381,7 @@ def build_recommendations(tables: dict[str, list[dict[str, Any]]],
     for sku_id, item in items.items():
         if as_number(field(item, "is_packaging")):
             continue
-        category = str(field(item, "category", default=""))
+        category = display_category(field(item, "category", default=""))
         recipients = sorted(
             (store_id for store_id in stores if needs.get((store_id, sku_id), 0) > 0),
             key=lambda store_id: priority(store_id, sku_id, store_to_store_days))
@@ -359,11 +407,12 @@ def build_recommendations(tables: dict[str, list[dict[str, Any]]],
                     continue
                 age = (as_of - oldest[(donor, sku_id)]).days if (donor, sku_id) in oldest else None
                 age_note = f"; oldest stock is {age} days old" if age is not None else ""
-                add_move("STORE_TO_STORE", donor, target, sku_id, qty, store_to_store_days,
+                donor_lead = lead_days(donor, target, store_to_store_days)
+                add_move("STORE_TO_STORE", donor, target, sku_id, qty, donor_lead,
                          f"Move surplus to a faster-selling store ({round(velocity[target, sku_id], 2)} "
                          f"vs {round(rate, 2)} units/day){age_note}; donor retains "
                          f"{round(after, 1)} days of cover and its category display floor.",
-                         cover_after=after)
+                         cover_after=after, donor_velocity=rate, age_days=age)
                 stock[donor, sku_id] -= qty
                 category_stock[donor, category] -= qty
                 on_hand[donor, sku_id] -= qty
@@ -380,7 +429,7 @@ def build_recommendations(tables: dict[str, list[dict[str, Any]]],
         age = (as_of - received).days
         if age < age_threshold:
             continue
-        category = str(field(item, "category", default=""))
+        category = display_category(field(item, "category", default=""))
         style_id = str(field(item, "style_id", default=""))
         if (store_id, style_id) in protected:
             continue
@@ -388,9 +437,10 @@ def build_recommendations(tables: dict[str, list[dict[str, Any]]],
         qty = min(int(on_hand[store_id, sku_id]), safe_category_units)
         if qty <= 0:
             continue
-        add_move("STORE_TO_WAREHOUSE", store_id, WAREHOUSE, sku_id, qty, store_to_wh_days,
+        return_lead = lead_days(store_id, WAREHOUSE, store_to_wh_days)
+        add_move("STORE_TO_WAREHOUSE", store_id, WAREHOUSE, sku_id, qty, return_lead,
                  f"Pull back {age}-day-old stock after no eligible store demand remained; "
-                 f"category display minimum is preserved.")
+                 f"category display minimum is preserved.", age_days=age)
         stock[store_id, sku_id] -= qty
         category_stock[store_id, category] -= qty
         on_hand[store_id, sku_id] -= qty
@@ -399,6 +449,12 @@ def build_recommendations(tables: dict[str, list[dict[str, Any]]],
     recommendations.sort(key=lambda move: (
         0 if move["priority"] == "P1" else 1,
         move["arrival_date"], move["move_type"], move["sku_id"], move["to_location"]))
+    return recommendations
+
+
+def limit_manager_alerts(recommendations: list[dict[str, Any]],
+                         tables: dict[str, list[dict[str, Any]]]) -> list[dict[str, Any]]:
+    stores = {str(field(row, "store_id", default="")): row for row in tables["stores"]}
     manager_limits = {
         str(field(row, "area_manager_id")): max(0, int(as_number(
             field(row, "max_alerts_per_week", "max_alerts"))))
@@ -422,6 +478,21 @@ def build_recommendations(tables: dict[str, list[dict[str, Any]]],
     return selected
 
 
+def validate_proposal_selection(moves: list[dict[str, Any]],
+                                tables: dict[str, list[dict[str, Any]]]) -> None:
+    stores = {str(field(row, "store_id", default="")): row for row in tables["stores"]}
+    items = {str(field(row, "sku_id", default="")): row for row in tables["items"]}
+    minimums = {}
+    for row in tables["min_display"]:
+        tier = str(field(row, "tier", "store_tier", default=""))
+        category = display_category(field(row, "category", default=""))
+        value = field(row, "min_display_units", "minimum_display_units", "minimum_units",
+                      "min_units", "units", "min_display")
+        if tier and category and value is not None:
+            minimums[tier, category] = int(as_number(value))
+    validate_recommendations(moves, stores, items, tables, minimums)
+
+
 def validate_recommendations(moves: list[dict[str, Any]], stores: dict[str, dict[str, Any]],
                              items: dict[str, dict[str, Any]], tables: dict[str, list[dict[str, Any]]],
                              minimums: dict[tuple[str, str], int]) -> None:
@@ -433,7 +504,7 @@ def validate_recommendations(moves: list[dict[str, Any]], stores: dict[str, dict
         units = as_number(field(row, "on_hand")) + as_number(field(row, "in_transit"))
         projected[location, sku] += units
         if location in stores and sku in items:
-            category_totals[location, str(field(items[sku], "category", default=""))] += units
+            category_totals[location, display_category(field(items[sku], "category", default=""))] += units
     protected = {(str(field(r, "store_id")), str(field(r, "style_id")))
                  for r in tables["flagship_protected"]}
     min_by_tier = minimums
@@ -446,10 +517,10 @@ def validate_recommendations(moves: list[dict[str, Any]], stores: dict[str, dict
             raise ValueError("Generated an invalid move quantity or unknown SKU.")
         if target in stores:
             projected[target, sku] += qty
-            category_totals[target, move["category"]] += qty
+            category_totals[target, display_category(move["category"])] += qty
         if source in stores:
             projected[source, sku] -= qty
-            category_totals[source, move["category"]] -= qty
+            category_totals[source, display_category(move["category"])] -= qty
         if move["move_type"] == "STORE_TO_STORE":
             if (source, move["style_id"]) in protected:
                 raise ValueError(f"Protected flagship style would leave {source}: {sku}")
@@ -460,8 +531,9 @@ def validate_recommendations(moves: list[dict[str, Any]], stores: dict[str, dict
                 raise ValueError(f"Store-to-store move leaves donor under 30 days of cover: {sku}")
         if source in stores:
             tier = str(field(stores[source], "tier", default=""))
-            floor = min_by_tier.get((tier, move["category"]), 0)
-            if category_totals[source, move["category"]] < floor:
+            category = display_category(move["category"])
+            floor = min_by_tier.get((tier, category), 0)
+            if category_totals[source, category] < floor:
                 raise ValueError(f"Move leaves {source} below its {move['category']} display minimum.")
         if target in stores:
             cap = as_number(field(stores[target], "stock_capacity_units", "capacity_units"))
@@ -478,13 +550,17 @@ def main(argv: list[str] | None = None) -> int:
                         help=f"age threshold for pullbacks (default: {DEFAULT_AGE_DAYS})")
     args = parser.parse_args(argv)
     try:
-        moves = build_recommendations(load_tables(args.input), age_threshold=args.age_days)
+        tables = load_tables(args.input)
+        moves = limit_manager_alerts(
+            build_recommendations(tables, age_threshold=args.age_days), tables)
         if args.output.suffix.lower() == ".json":
             args.output.write_text(json.dumps(moves, indent=2), encoding="utf-8")
         else:
             columns = ["priority", "move_type", "from_location", "to_location", "sku_id",
                        "style_id", "category", "qty", "dispatch_date", "arrival_date",
-                       "daily_velocity", "donor_cover_after_days", "reason"]
+                       "daily_velocity", "donor_daily_velocity", "donor_cover_after_days",
+                       "stock_age_days", "move_value_mrp",
+                       "approval_threshold_mrp", "requires_human_approval", "reason"]
             with args.output.open("w", newline="", encoding="utf-8") as file:
                 writer = csv.DictWriter(file, fieldnames=columns)
                 writer.writeheader()

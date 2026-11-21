@@ -1,7 +1,9 @@
 import unittest
 from datetime import date, timedelta
 
-from stock_mover import build_recommendations
+from stock_mover import build_recommendations, limit_manager_alerts
+from backend.app.optimizer import optimize_proposals
+from backend.app.forecast import forecast_velocity
 
 
 AS_OF = date(2026, 10, 31)
@@ -43,6 +45,10 @@ def fixture(receiver_stock=0, receiver_transit=0, donor_stock=100, protected=Fal
             {"store_id": "REC", "sku_id": "KUR-01-M", "days_in_stock": 90},
             {"store_id": "DON", "sku_id": "KUR-01-M", "days_in_stock": 90},
         ],
+        "rules": [{
+            "rule": "Approval",
+            "detail": "Moves worth more than Rs 1,00,000 at MRP require human approval.",
+        }],
         "min_display": [{"tier": "A", "category": "Kurta Set", "min_display_units": 0},
                         {"tier": "S++", "category": "Kurta Set", "min_display_units": 10}],
         "lead_times": [
@@ -88,7 +94,22 @@ class StockMoverTests(unittest.TestCase):
         self.assertIn("150-day-old", pullback["reason"])
 
     def test_manager_weekly_alert_limit_is_respected(self):
-        self.assertEqual(build_recommendations(fixture(alert_limit=0)), [])
+        data = fixture(alert_limit=0)
+        candidates = build_recommendations(data)
+        self.assertTrue(candidates)
+        self.assertEqual(limit_manager_alerts(candidates, data), [])
+
+    def test_milp_optimizer_keeps_feasible_recommendations(self):
+        data = fixture()
+        proposals = build_recommendations(data)
+        optimized, metadata = optimize_proposals(proposals, data)
+        self.assertEqual(metadata["optimizer"], "scipy_milp")
+        self.assertEqual(len(optimized), len(proposals))
+
+    def test_forecast_falls_back_when_history_is_not_model_ready(self):
+        velocity, metadata = forecast_velocity(fixture())
+        self.assertEqual(metadata["status"], "fallback")
+        self.assertTrue(all(value == 0 for value in velocity.values()))
 
 
 if __name__ == "__main__":

@@ -1,0 +1,207 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#451921">
+    <meta name="description" content="Manyavar Stock Mover — explainable, rule-safe inventory recommendations.">
+    <title>Stock Mover — Manyavar</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Playfair+Display:wght@500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <a class="brand" href="/" aria-label="Manyavar Stock Mover home">
+          <img src="/brand.svg" alt="" width="42" height="42">
+          <span><strong>manyavar</strong><small>STOCK MOVER</small></span>
+        </a>
+        <div class="workspace-label">MERCHANDISING</div>
+        <nav class="primary-nav" aria-label="Main navigation">
+          <button class="nav-link active" data-view="overview"><span class="nav-icon">◫</span> Overview</button>
+          <button class="nav-link" data-view="moves"><span class="nav-icon">⇄</span> Move approvals <i id="nav-pending">—</i></button>
+          <button class="nav-link" data-view="stores"><span class="nav-icon">⌂</span> Store network</button>
+          <button class="nav-link" data-view="products"><span class="nav-icon">◇</span> Product intelligence</button>
+          <button class="nav-link" data-view="bills"><span class="nav-icon">▧</span> Bill analyzer</button>
+          <button class="nav-link" data-view="model"><span class="nav-icon">⌁</span> Demand &amp; AI</button>
+          <button class="nav-link" data-view="data"><span class="nav-icon">▤</span> Data &amp; rules</button>
+        </nav>
+        <div class="sidebar-bottom">
+          <div class="sidebar-callout">
+            <span class="callout-eyebrow">THE DAILY BRIEF</span>
+            <strong>Make every piece<br>find its place.</strong>
+            <span>One network. One considered move at a time.</span>
+          </div>
+          <div class="system-status"><span class="status-dot"></span><span id="system-status-text">Connecting to engine</span></div>
+          <div class="sidebar-foot">VEDANT FASHIONS LIMITED <span>·</span> AI HACKATHON</div>
+        </div>
+      </aside>
+
+      <main class="main-content">
+        <header class="topbar">
+          <div class="breadcrumb"><span>MERCHANDISING</span><b>/</b><strong id="breadcrumb-current">Overview</strong></div>
+          <div class="topbar-actions">
+            <div class="run-date"><span class="live-dot"></span><span id="last-run">Waiting for dataset</span></div>
+            <button class="icon-button" id="run-button" title="Run recommendations" aria-label="Run recommendations">↻</button>
+            <button class="top-upload" id="top-upload-button"><span>＋</span> Upload data</button>
+            <span class="role-chip" id="current-user-label">Local workspace</span>
+            <button class="user-avatar" id="auth-button" aria-label="Merchandising team access" title="Team access">M</button>
+          </div>
+        </header>
+
+        <section class="view active" id="overview-view">
+          <div id="welcome-banner" class="welcome-banner">
+            <div class="welcome-copy">
+              <span class="eyebrow"><span class="spark">✳</span> THE STOCK MOVER DAILY BRIEF</span>
+              <h1>Stock in the<br><em>right place.</em></h1>
+              <p>One clear view of where every style is selling, where it is waiting, and what to do next.</p>
+              <button class="button button-cream" id="welcome-upload">Upload your stock workbook <span>→</span></button>
+              <div class="welcome-trust"><span>✦</span> Recommendations respect every store rule, automatically.</div>
+            </div>
+            <div class="welcome-image">
+              <img src="https://images.unsplash.com/photo-1610030469983-98e550d6193c?auto=format&fit=crop&w=1300&q=85"
+                   alt="Editorial stock photograph of Indian occasionwear" onerror="this.parentElement.classList.add('image-fallback');this.remove()">
+              <div class="image-caption"><span>OCCASIONWEAR, CONSIDERED</span><strong>Every style has a place to shine.</strong></div>
+              <span class="image-index">01 <i>/</i> 03</span>
+            </div>
+            <div class="banner-glass"></div>
+          </div>
+
+          <div class="section-heading dashboard-heading">
+            <div><span class="eyebrow muted-eyebrow">NETWORK PULSE</span><h2>Good morning, merchandiser<span class="heading-period">.</span></h2></div>
+            <div class="data-period" id="data-period">Upload the shared hackathon dataset to activate live numbers</div>
+          </div>
+
+          <div class="kpi-grid" id="kpi-grid">
+            <article class="kpi-card"><div class="kpi-label">NETWORK STOCK <span class="kpi-mark">◈</span></div><div class="kpi-value" id="kpi-stock">—</div><div class="kpi-foot">units across stores <span class="kpi-accent">+ in transit</span></div></article>
+            <article class="kpi-card"><div class="kpi-label">WAREHOUSE READY <span class="kpi-mark">▦</span></div><div class="kpi-value" id="kpi-warehouse">—</div><div class="kpi-foot">units at WH-KOL</div></article>
+            <article class="kpi-card"><div class="kpi-label">SALES VALUE <span class="kpi-mark">₹</span></div><div class="kpi-value" id="kpi-revenue">—</div><div class="kpi-foot">full sales history <span class="kpi-accent">incl. GST</span></div></article>
+            <article class="kpi-card kpi-highlight"><div class="kpi-label">TO REVIEW <span class="kpi-mark">✳</span></div><div class="kpi-value" id="kpi-pending">—</div><div class="kpi-foot"><span id="kpi-p1">Upload data for recommendations</span><a href="#" data-go="moves">Review moves →</a></div></article>
+          </div>
+
+          <div class="content-grid">
+            <section class="panel movement-panel">
+              <div class="panel-heading"><div><span class="eyebrow muted-eyebrow">READY WHEN YOU ARE</span><h3>Moves to consider</h3></div><button class="text-button" data-go="moves">All recommendations <span>→</span></button></div>
+              <div id="overview-moves" class="move-preview empty-inline"><span class="empty-star">✳</span><strong>Your next best move starts here.</strong><span>Upload the stock workbook to calculate rule-checked recommendations.</span><button class="text-button" id="inline-upload">Choose a workbook →</button></div>
+            </section>
+            <section class="panel insight-panel">
+              <div class="panel-heading"><div><span class="eyebrow muted-eyebrow">A LITTLE CONTEXT</span><h3>Network notes</h3></div><span class="panel-icon">✦</span></div>
+              <div id="insights-list" class="insights-list"><div class="empty-note">Your store and stock signals appear here once data is loaded.</div></div>
+              <div class="insight-bottom"><span class="insight-pulse"></span> Rules checked before a move reaches your list</div>
+            </section>
+          </div>
+
+          <section class="panel network-panel">
+            <div class="panel-heading"><div><span class="eyebrow muted-eyebrow">A VIEW ACROSS THE NETWORK</span><h3>Stock, with a little perspective</h3></div><button class="text-button" data-go="stores">Explore stores <span>→</span></button></div>
+            <div id="category-chart" class="category-chart empty-chart"><div class="chart-placeholder">Your category balance will take shape after the first upload.</div></div>
+            <div class="chart-footnote"><span>UNITS ON HAND + IN TRANSIT</span><span id="category-chart-total">—</span></div>
+          </section>
+          <footer class="page-footer">Designed for the daily rhythm of good merchandising <span>✳</span></footer>
+        </section>
+
+        <section class="view" id="moves-view">
+          <div class="page-title-row"><div><span class="eyebrow muted-eyebrow">THE APPROVAL QUEUE</span><h1>Moves worth making<span class="heading-period">.</span></h1><p>Every recommendation is dated, explained, and checked against your rules.</p></div><a class="button button-outline" href="/api/export?format=csv">↓ Export list</a></div>
+          <div class="filter-row">
+            <label class="search-box"><span>⌕</span><input id="move-search" type="search" placeholder="Find a style, store or SKU"></label>
+            <select id="move-type-filter" aria-label="Filter move type"><option value="">All move types</option><option value="WAREHOUSE_TO_STORE">Warehouse → store</option><option value="STORE_TO_STORE">Store → store</option><option value="STORE_TO_WAREHOUSE">Pull back to warehouse</option></select>
+            <select id="move-decision-filter" aria-label="Filter decision"><option value="pending">Awaiting decision</option><option value="">All decisions</option><option value="approved">Approved</option><option value="rejected">Declined</option></select>
+            <span class="filter-count" id="move-count">0 recommendations</span>
+          </div>
+          <div class="move-list" id="move-list"><div class="empty-state"><span>✳</span><h3>A considered list, not a noisy one.</h3><p>Upload the workbook to see stock moves ranked by urgency and checked against store capacity, cover and display rules.</p><button class="button button-rust" data-upload>Upload dataset</button></div></div>
+        </section>
+
+        <section class="view" id="stores-view">
+          <div class="page-title-row"><div><span class="eyebrow muted-eyebrow">20 STORES · ONE CONNECTED NETWORK</span><h1>Each store, in its element<span class="heading-period">.</span></h1><p>See stock, capacity and sales together to spot where the network can work harder.</p></div></div>
+          <div class="store-summary-strip" id="store-summary-strip"></div>
+          <div class="table-wrap"><table class="data-table"><thead><tr><th>STORE</th><th>GRADE</th><th>AREA MANAGER</th><th>NETWORK STOCK</th><th>CAPACITY</th><th>SALES VALUE</th><th>UNITS SOLD</th><th>FOOTFALL · 6 MO</th><th>VISIT → BILL</th><th>AVG STAFF PRESENT</th></tr></thead><tbody id="store-table"><tr><td colspan="10" class="empty-cell">Upload your dataset to see store-level performance.</td></tr></tbody></table></div>
+          <section class="panel detail-panel" id="store-detail"><div class="empty-note">Choose a store to explore its weekly sales, stock position, best sellers and dormant inventory.</div></section>
+        </section>
+
+        <section class="view" id="products-view">
+          <div class="page-title-row"><div><span class="eyebrow muted-eyebrow">385 SKU VARIANTS · STORE-LEVEL VELOCITY</span><h1>Every style, understood<span class="heading-period">.</span></h1><p>Compare what sells, where stock sits, and which unsold sizes have actually been available to shoppers.</p></div></div>
+          <div class="filter-row product-filters">
+            <label class="search-box"><span>⌕</span><input id="product-search" type="search" placeholder="Search SKU, style or category"></label>
+            <select id="product-category-filter" aria-label="Filter product category"><option value="">All categories</option></select>
+            <select id="product-store-filter" aria-label="Filter product store"><option value="">All stores</option></select>
+            <select id="product-sort" aria-label="Sort products"><option value="recent">Recent sales</option><option value="units">All-time units</option><option value="revenue">Revenue</option><option value="stock">Network stock</option><option value="age">Oldest stock</option><option value="name">Name</option></select>
+            <label class="toggle-filter"><input id="product-unsold-only" type="checkbox"> Unsold with stock</label>
+            <span class="filter-count" id="product-count">0 products</span>
+          </div>
+          <div class="product-layout">
+            <section class="panel product-table-panel">
+              <div class="table-wrap"><table class="data-table product-table"><thead><tr><th>STYLE / SKU</th><th>CATEGORY</th><th>SIZE</th><th>24-MO UNITS</th><th>12-WK UNITS</th><th>STORE STOCK</th><th>WH STOCK</th><th>BEST STORE</th></tr></thead><tbody id="product-table"><tr><td colspan="8" class="empty-cell">Product intelligence loads after the dataset is ready.</td></tr></tbody></table></div>
+            </section>
+            <section class="panel product-detail" id="product-detail"><div class="empty-note">Select a product to see its catalogue description, weekly sales, inventory age, and store-by-store performance.</div></section>
+          </div>
+          <p class="data-disclaimer">Product copy uses catalogue fields only. Fabric, colour and care claims are not inferred when absent from source data. “Unsold with stock” requires recorded in-stock exposure during the last 12 weeks.</p>
+        </section>
+
+        <section class="view" id="bills-view">
+          <div class="page-title-row"><div><span class="eyebrow muted-eyebrow">BILL LINES → SELL-THROUGH → STOCK ACTION</span><h1>Read the selling signal<span class="heading-period">.</span></h1><p>Find each store’s strongest products, high-value bills, and stock that had a chance to sell but did not.</p></div><label class="store-picker">STORE<select id="bill-store-filter"><option value="">All stores</option></select></label></div>
+          <div class="store-summary-strip" id="bill-kpis"></div>
+          <div class="bill-grid">
+            <section class="panel chart-panel"><div class="panel-heading"><div><span class="eyebrow muted-eyebrow">BEST SELLERS</span><h3>Units sold · recent 12 weeks</h3></div></div><div id="bill-product-chart" class="bar-chart"><div class="chart-loading">Choose a store or load the shared dataset.</div></div></section>
+            <section class="panel bill-table-panel"><div class="panel-heading"><div><span class="eyebrow muted-eyebrow">LARGEST BILLS</span><h3>High-value baskets</h3></div></div><div class="table-wrap"><table class="data-table"><thead><tr><th>DATE</th><th>STORE</th><th>PRODUCT</th><th>UNITS</th><th>BILL VALUE</th></tr></thead><tbody id="bill-table"><tr><td colspan="5" class="empty-cell">Bill analysis will appear here.</td></tr></tbody></table></div></section>
+          </div>
+          <section class="panel dormant-panel"><div class="panel-heading"><div><span class="eyebrow muted-eyebrow">SELLS ELSEWHERE, SITS HERE</span><h3>Stock with no recent sales exposure signal</h3></div><span class="panel-icon">↗</span></div><div class="table-wrap"><table class="data-table"><thead><tr><th>PRODUCT</th><th>STORE STOCK</th><th>IN-STOCK DAYS</th><th>OLDEST UNIT AGE</th><th>BEST OTHER STORE</th><th>READY MOVE</th></tr></thead><tbody id="dormant-table"><tr><td colspan="6" class="empty-cell">Select a store to compare its bill history with stock held across the network.</td></tr></tbody></table></div><p class="data-disclaimer">The system never labels zero sales as weak demand when recent in-stock exposure is missing. A “ready move” appears only when the rule engine has generated a safe, pending recommendation.</p></section>
+        </section>
+
+        <section class="view" id="model-view">
+          <div class="page-title-row"><div><span class="eyebrow muted-eyebrow">PREDICT WITH CARE, MOVE WITH CONFIDENCE</span><h1>Demand &amp; decision science<span class="heading-period">.</span></h1><p>Forecasting informs the list. Deterministic checks decide what is allowed.</p></div><span class="model-badge" id="model-status">MODEL NOT RUN</span></div>
+          <div class="model-grid">
+            <article class="panel model-card"><span class="eyebrow muted-eyebrow">DEMAND MODEL</span><div class="model-name" id="model-name">Waiting for data</div><p id="model-description">Availability-adjusted demand, learned from the observed store/SKU selling history.</p><div class="model-facts" id="model-facts"></div></article>
+            <article class="panel model-card"><span class="eyebrow muted-eyebrow">ALLOCATION LOGIC</span><div class="model-name" id="optimizer-name">Network allocation</div><p>Scarce stock is assigned to unmet demand while respecting inventory, capacity, display rules, donor cover and manager alert limits.</p><div class="model-facts"><span>OBJECTIVE<strong>Expected gross-margin opportunity</strong></span><span>DECISION<strong>Rule-checked proposal selection</strong></span></div></article>
+          </div>
+          <section class="panel science-panel"><div class="panel-heading"><div><span class="eyebrow muted-eyebrow">THE METHOD, IN PLAIN LANGUAGE</span><h3>From velocity to a move</h3></div></div>
+            <div class="science-steps"><div><i>01</i><strong>Learn what sells</strong><p>Fit a pooled Tweedie model when LightGBM is available, correcting observed units by in-stock days. Festival, wedding, store tier and product features are included.</p></div><div><i>02</i><strong>Allocate with purpose</strong><p>Use expected margin and urgency to prioritize shortages; a binary MILP selects among safe proposals when SciPy is installed.</p></div><div><i>03</i><strong>Prove each rule</strong><p>Python checks the proposed moves against display minimums, protected S++ styles, 30-day donor cover, in-transit stock and store capacity.</p></div><div><i>04</i><strong>Keep a human in charge</strong><p>Gemini can answer questions about computed results; it never calculates stock, edits a move, or approves one on a person's behalf.</p></div></div>
+          </section>
+          <section class="panel chat-panel"><div><span class="eyebrow muted-eyebrow">ASK YOUR MERCHANDISING COPILOT</span><h3>Curious about a recommendation?</h3><p>Gemini explains the calculated numbers and context. It does not invent a stock position.</p></div><form id="chat-form"><textarea id="chat-question" rows="2" placeholder="Why is this store receiving this style?"></textarea><button class="button button-rust" type="submit">Ask Gemini <span>→</span></button></form><div id="chat-answer" class="chat-answer" aria-live="polite"></div></section>
+        </section>
+
+        <section class="view" id="data-view">
+          <div class="page-title-row"><div><span class="eyebrow muted-eyebrow">THE FOUNDATION OF EVERY GOOD DECISION</span><h1>Bring the whole picture<span class="heading-period">.</span></h1><p>One workbook, the connected view of stores, styles, stock, sales, and rules.</p></div></div>
+          <div class="data-layout">
+            <section class="panel upload-panel"><div class="upload-mark">↥</div><span class="eyebrow muted-eyebrow">SECURE DATA INTAKE</span><h2>Start with your workbook.</h2><p>Upload the provided Excel workbook, or a ZIP containing one CSV per workbook tab. Your file is processed by the local FastAPI service.</p>
+              <div class="dropzone" id="dropzone"><span class="drop-icon">▤</span><strong>Drop your workbook here</strong><span>Excel workbook (.xlsx) or zipped CSV tables · up to 200 MB</span><button class="button button-rust" id="choose-file">Browse files</button><input id="file-input" type="file" accept=".xlsx,.zip" hidden></div>
+              <div class="upload-progress" id="upload-progress" hidden><span class="spinner"></span><span id="upload-message">Analysing workbook…</span></div>
+              <div class="data-source" id="data-source"><span class="source-dot"></span><span id="data-source-name">No dataset loaded</span></div>
+            </section>
+            <section class="panel guide-panel"><span class="eyebrow muted-eyebrow">WHAT THE ENGINE NEEDS</span><h3>Every table has a part to play.</h3><div class="table-guide">
+              <div><b>NETWORK</b><span>stores · area_managers · items</span></div><div><b>SELL-THROUGH</b><span>bills · bill_lines · stock_weekly</span></div><div><b>ON-HAND</b><span>stock_snapshot · warehouse_inbound</span></div><div><b>GUARDRAILS</b><span>min_display · lead_times · flagship_protected</span></div><div><b>SEASONALITY</b><span>calendar (festivals and wedding dates)</span></div>
+            </div><div class="guide-note"><span>✦</span><span>Use the shared hackathon data guide for column names and ID joins. The service validates required tables and rules before recommendations are produced.</span></div></section>
+          </div>
+          <section class="panel rules-panel"><div class="panel-heading"><div><span class="eyebrow muted-eyebrow">RULES ARE NOT SUGGESTIONS</span><h3>Always-on safeguards</h3></div><span class="panel-icon">✓</span></div>          <div class="rule-grid"><div><b>01</b><strong>Keep the display</strong><span>Every tier keeps its minimum units for each category.</span></div><div><b>02</b><strong>Respect the flagship</strong><span>S++ protected top-20 styles never leave their store.</span></div><div><b>03</b><strong>Count what is coming</strong><span>In-transit units count toward projected store stock.</span></div><div><b>04</b><strong>Leave room to sell</strong><span>Never exceed a store's stated unit capacity.</span></div><div><b>05</b><strong>Protect donor cover</strong><span>Store-to-store moves leave 30+ days of donor cover.</span></div><div><b>06</b><strong>Human approval</strong><span>Moves above ₹1,00,000 at MRP require a human decision.</span></div><div><b>07</b><strong>Explain every move</strong><span>Each recommendation includes one clear, numeric reason.</span></div></div></section>
+        </section>
+      </main>
+    </div>
+    <dialog class="auth-dialog" id="auth-dialog">
+      <form id="auth-form">
+        <button class="dialog-close" type="button" id="auth-close" aria-label="Close">×</button>
+        <span class="eyebrow muted-eyebrow">MERCHANDISING ACCESS</span>
+        <h2 id="auth-title">Choose your demo workspace.</h2>
+        <p id="auth-description">Sign in as a merchandising role. Demo sessions are permission-aware and expire after eight hours.</p>
+        <label for="demo-role">Workspace role</label>
+        <select id="demo-role">
+          <option value="admin">Admin · full demo access</option>
+          <option value="stock_manager">Stock manager · upload, run, approve</option>
+          <option value="validator">Validator · approve and decline moves</option>
+          <option value="area_manager">Area manager · assigned store approvals</option>
+          <option value="analyst">Analyst · read dashboards and ask Gemini</option>
+          <option value="viewer">Viewer · read-only</option>
+        </select>
+        <label id="area-manager-label" for="area-manager-account" hidden>Area manager account</label>
+        <select id="area-manager-account" hidden><option value="AM-01">AM-01</option><option value="AM-02">AM-02</option><option value="AM-03">AM-03</option><option value="AM-04">AM-04</option><option value="AM-05">AM-05</option><option value="AM-06">AM-06</option></select>
+        <label id="token-label" for="auth-token" hidden>Team access token</label>
+        <input id="auth-token" type="password" autocomplete="current-password" placeholder="Only needed when configured by your team" hidden>
+        <button class="button button-rust" type="submit">Enter workspace <span>→</span></button>
+      </form>
+    </dialog>
+    <div class="app-loader" id="app-loader" role="status" aria-live="polite">
+      <div class="loader-orbit"><span></span><i></i></div><strong>Setting the stockroom.</strong><span>Connecting sales, inventory and store rules…</span>
+    </div>
+    <div class="toast" id="toast" role="status" aria-live="polite"></div>
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>

@@ -1,68 +1,229 @@
 # Manyavar Stock Mover
 
-Stock Mover turns the hackathon stock, sales, and rules data into a prioritized
-movement list for warehouse replenishment, store rebalancing, and aged-stock
-pullbacks. Every output row includes a dispatch/arrival date and a one-line
-reason.
+An approval-first inventory decision system for the Manyavar stock-movement
+brief. The product combines a Node.js web/API gateway, a Python FastAPI data and
+decision service, a LightGBM demand forecast, constrained move selection,
+deterministic rule validation, persisted approvals, and an optional Gemini
+merchandising copilot.
 
-## Run
+The UI pairs Manyavar's ivory and maroon identity with jade, indigo, and amber
+data accents, glass panels, editorial stock photography, and loading states.
+The images are illustrative stock photography, not product-specific catalogue
+images. No recommendation numbers are fabricated for the empty state: upload
+the shared workbook or CSV bundle to populate the dashboard.
 
-Use the supplied Excel workbook:
+## Start locally
+
+Requirements: Node.js 18+, Python 3.11+ (3.14 works with current wheels).
 
 ```bash
-python stock_mover.py /path/to/stock_mover.xlsx -o recommendations.csv
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install -r backend/requirements.txt
+cp .env.example .env
 ```
 
-Or use a directory containing one CSV per table, with filenames matching the
-table names below:
+Demo role sign-in is enabled by default for local showcases; anyone can choose
+a demo role without a password. Add secrets only to the local, git-ignored
+`.env` file and never commit API keys. In one terminal start FastAPI:
 
 ```bash
-python stock_mover.py /path/to/csv-tables -o recommendations.csv
+uvicorn backend.main:app --reload --env-file .env --host 127.0.0.1 --port 8000
 ```
 
-Use `-o recommendations.json` for JSON output. Excel input requires
-`openpyxl` (`python -m pip install openpyxl`); CSV input uses only the Python
-standard library. Run the focused tests with `python -m unittest discover -s
-tests`.
+In another terminal start the Node.js web server:
 
-Required tables: `stores`, `area_managers`, `items`, `bills`, `bill_lines`, `stock_snapshot`,
-`stock_weekly`, `min_display`, `lead_times`, and `flagship_protected`.
-`warehouse_inbound` is optional. CSV headers use the column names in the data
-guide; headers and sheet/file names are case- and punctuation-insensitive.
-`stock`/`stock_snapshots` can be used as aliases for `stock_snapshot`.
+```bash
+npm start
+```
 
-The rules tables need these fields (accepted alternatives are in parentheses):
+Node reads the same local `.env` file automatically.
 
-* `min_display`: `tier`, `category`, and `min_display_units` (`min_units`,
-  `minimum_units`, or `units`).
-* `lead_times`: `from_type`, `to_type`, and `lead_time_days` (`lead_days`,
-  `days`, or `lead_time`). Types must identify warehouse/store endpoints.
-* `flagship_protected`: `store_id` and `style_id`.
+Open [http://localhost:3000](http://localhost:3000) and choose a role. Upload
+the workbook on the **Data & rules** page or from the welcome banner. The API accepts an `.xlsx`
+workbook or a `.zip` archive containing one `.csv` file per table. Required
+tables are `stores`, `area_managers`, `items`, `bills`, `bill_lines`,
+`stock_snapshot`, `stock_weekly`, `rules`, `min_display`, `lead_times`, and
+`flagship_protected`. `warehouse_inbound` and `calendar` are optional; calendar
+features improve the learned forecast. The upload is validated before its
+recommendations replace the current dataset.
 
-## Decision policy
+The FastAPI process stores the last uploaded source, approval decisions, and
+analysis state in `DATA_DIR` (default `./data`). It reloads the latest source
+on restart. The daily scheduler recomputes from that most recently uploaded
+snapshot; it does not fetch new ERP/WMS data. To make the inputs themselves
+fully automatic, connect a scheduled export or inventory-system adapter to
+the upload API. No source-system credentials or integration details were
+provided in the brief, so none are assumed here.
 
-* Velocity uses bill-line units over the 12-week stock-observation window,
-  divided by the SKU's in-stock days from those weekly snapshots. If there are sales but no recorded
-  in-stock days, it uses a 90-day denominator. A zero-sales SKU with no in-stock
-  days has unknown demand (zero computed velocity), so it is not treated as
-  evidence of slow demand.
-* Projected store stock includes on-hand and in-transit units. Only on-hand
-  units can be dispatched. Warehouse planned inbound is available for future
-  dispatch; the output date is moved to the earliest expected receipt when that
-  supply is needed.
-* Replenishment aims for lead time plus 30 days of SKU cover, and fills any
-  unmet category display minimum. Capacity is respected and warehouse supply
-  goes to the most urgent shortages first. Priority is P1 when current cover is
-  within the relevant lead time; otherwise it is P2.
-* Store-to-store moves cannot use protected flagship styles, must preserve the
-  category display minimum, and leave the donor at or above 30 days of cover.
-  Store-to-warehouse pullbacks are limited to stock above the category minimum.
-* Output is prioritized and capped to each affected area manager's
-  `max_alerts_per_week`; a store-to-store move counts against both managers.
-* Aged pullbacks use the oldest received date and default to 120 days. Adjust
-  this policy with `--age-days N`. This is a transparent operating heuristic,
-  not a threshold specified by the brief.
+### Docker
 
-The source brief did not include the actual workbook/CSV files. The analyzer
-therefore produces a live recommendation list when run against the provided
-dataset, but no real store/SKU recommendations are checked into this repository.
+```bash
+cp .env.example .env
+# Set DEMO_MODE=false, APPROVAL_TOKEN, and GEMINI_API_KEY for a shared deployment.
+docker compose up --build
+```
+
+Open [http://localhost:3000](http://localhost:3000). The named Docker volume
+persists uploaded data and decisions.
+
+## Product capabilities
+
+* **Warehouse → store:** prioritized shortages, available warehouse stock,
+  planned inbound supply, lead-time dates, store capacity, and dispatch
+  recommendations.
+* **Store → store:** send stock from available donor surplus to uncovered
+  demand; respect donor cover, category display minimums, S++ flagship style
+  protections, capacity, and lead time.
+* **Ageing stock:** identify units past the configurable 120-day operating
+  heuristic and pull back stock above the store's category display floor when
+  the rebalancing pass found no safe destination. Adjust via
+  `AGE_THRESHOLD_DAYS` or the standalone CLI `--age-days` option.
+* **Explainable review:** each move has urgency, from/to locations, SKU and
+  style, quantity, dispatch/arrival dates, demand velocity, and a concise
+  reason. Merchandisers can approve or decline; the decision log survives
+  restart. Lists are downloadable as CSV or JSON. Approval records are not a
+  physical shipment; executing transfers requires an ERP/WMS integration.
+* **Role-based demo access:** admin, stock manager, validator, area manager,
+  analyst, and read-only viewer sessions have distinct permissions. Area
+  managers select their AM account and are limited to that area for store
+  views and decisions. Approval records retain the acting role and name.
+* **Product intelligence:** browse every SKU with generated copy based only on
+  catalogue fields, product revenue and units, recent availability-corrected
+  velocity, current store/warehouse stock, oldest-unit age, weekly trends, and
+  a same-SKU comparison across stores. Missing stock exposure is shown as
+  unknown rather than interpreted as weak demand.
+* **Bill analyzer:** compare recent top sellers, largest bills, and
+  exposure-confirmed unsold stock by store. It links a dormant SKU to another
+  selling store and shows a “ready move” only when the rule engine has an
+  actual pending safe recommendation.
+* **Store detail:** drill into recent weekly sales/stock, top products,
+  exposure-confirmed dormant inventory, capacity, and category position.
+* **Network view:** inventory, warehouse stock, historic sales value, store
+  capacity, category balance, recommendations, and operational exceptions.
+* **Availability-aware demand:** use the trailing observed stock weeks and
+  availability exposure so a zero-sale size with zero availability is not
+  treated as proof of weak demand. Pool style-level signal across sizes.
+* **Festival and wedding context:** calendar dates, category, tier, price,
+  style, and recent velocity feed the optional pooled model.
+* **Manager attention:** respect each area manager's `max_alerts_per_week`.
+* **Optional Gemini Q&A:** ask questions about the computed recommendation set.
+  Gemini receives aggregate stock and the move list, and is instructed not to
+  invent arithmetic or authorize changes. Recommendations still run without
+  an API key.
+* **Daily recompute:** `AUTO_RUN_INTERVAL_HOURS` defaults to 24 and recomputes
+  recommendations from the persisted latest dataset. Set it to `0` to disable.
+
+## Model and decision design
+
+The system keeps prediction, optimization, and rule enforcement distinct:
+
+1. **Forecast.** `backend/app/forecast.py` trains a pooled LightGBM regressor
+   with a Tweedie objective on observed store/SKU/week availability-corrected
+   sales. Category, style, SKU, tier, price, calendar seasonality, festival,
+   wedding, recent SKU velocity, and recent pooled style velocity are model
+   features. It reports a time-ordered two-week holdout MAE/WAPE. If there are
+   too few observations or the model dependency is missing, it visibly falls
+   back to sales divided by in-stock days; this is not represented as a trained
+   model.
+2. **Allocation.** `stock_mover.py` builds feasible warehouse, lateral-transfer,
+   and age-return candidates in urgency order. `backend/app/optimizer.py` uses
+   a binary SciPy MILP to select a high expected gross-margin subset under
+   aggregate supply, category display, capacity, 30-day donor-cover, and
+   manager-alert limits. Pullbacks receive a modest ageing-risk recovery proxy,
+   not a claim of realized profit. The optimizer considers the full candidate
+   pool before applying each manager's alert cap. If SciPy is unavailable, the service uses its safe
+   priority fallback. This is a practical candidate-selection adaptation of a
+   network-allocation MIP, not a claim to reproduce Zara's proprietary system
+   or the full stochastic optimization from the paper.
+3. **Validator.** The deterministic Python validator checks protected S++
+   styles, capacity, category display minimums, available stock, and minimum
+   donor cover before a recommendation can reach the API. Transit is included
+   in projected store cover and excluded from dispatchable on-hand units.
+4. **Explanation.** The recommendation engine writes the reason from computed
+   values. Gemini is only a question-answering aid and is never the source of
+   move quantities or rule decisions.
+
+The ageing threshold (120 days) is an explicit configurable heuristic because
+the brief does not define one. The provided data also does not define
+style-specific size-run/display policy, so the engine uses the supplied
+tier/category display minimum rather than inventing a required size assortment.
+
+## Configuration
+
+| Variable | Purpose | Default |
+|---|---|---|
+| `GEMINI_API_KEY` | Gemini API key for the optional Q&A feature | unset |
+| `DEMO_MODE` | Enable passwordless, role-based demo sessions | `true` |
+| `APPROVAL_TOKEN` | Optional gate for demo sign-in, or required team token when demo mode is off | unset |
+| `APP_SESSION_SECRET` | HMAC secret for the HttpOnly, 8-hour session cookie | random per process in local mode |
+| `AUTO_RUN_INTERVAL_HOURS` | Recompute interval for the latest uploaded snapshot | `24` |
+| `AGE_THRESHOLD_DAYS` | Ageing-stock pullback heuristic threshold | `120` |
+| `DATA_DIR` | Persistent uploads and approval decisions | `./data` |
+| `FASTAPI_URL` | Node gateway's FastAPI upstream | `http://127.0.0.1:8000` |
+| `PORT` | Node gateway listen port | `3000` |
+
+Demo mode is intentionally open and is not production authentication. For any
+shared deployment, set `DEMO_MODE=false`, a long random `APPROVAL_TOKEN`, a
+separate random `APP_SESSION_SECRET`, and terminate HTTPS at a trusted reverse proxy.
+The FastAPI port should remain private; the included Compose setup exposes only
+the Node gateway.
+
+## API
+
+The gateway proxies FastAPI routes. Useful endpoints:
+
+* `GET /api/health`, `GET /api/summary`, `GET /api/stores`,
+  `GET /api/insights`
+* `GET /api/products`, `GET /api/products/{sku_id}`,
+  `GET /api/analytics/meta`, `GET /api/stores/{store_id}`,
+  `GET /api/bill-analysis?store_id=...`
+* `POST /api/upload` (`multipart/form-data`, field `file`), `POST /api/run`
+* `GET /api/recommendations` with optional `move_type`, `decision`, `priority`,
+  `search`, and `limit` filters
+* `PATCH /api/recommendations/{id}` with `{"status":"approved"}` or
+  `{"status":"rejected","note":"..."}`
+* `GET /api/export?format=csv|json`, `POST /api/ask`
+
+In demo mode, the browser obtains an HttpOnly signed role session. Upload/run
+is limited to admin and stock-manager roles; approvals are limited to admin,
+stock manager, validator, and area manager. In production mode, token sign-in
+creates an admin session; writes are rejected without a valid session.
+
+## Tests
+
+```bash
+python -m unittest discover -s tests -v
+node --check server.mjs
+node --check public/app.js
+```
+
+Tests cover workbook upload, in-transit demand, protected styles, display
+minimums, donor cover, capacity, alert limits, and safe optimizer behavior.
+
+## Research references
+
+The algorithm is inspired by the participant-provided research; it is adapted
+to the explicit Manyavar data and rules rather than asserted to be an exact
+reimplementation.
+
+* Caro & Gallien (2010), *Inventory Management of a Fast-Fashion Retail
+  Network*: [INFORMS](https://pubsonline.informs.org/doi/fpi/10.1287/opre.1090.0698),
+  [MIT record](https://dspace.mit.edu/handle/1721.1/39810?show=full).
+* M5/modern retail forecasting discussion:
+  [arXiv:2310.13029](https://ar5iv.labs.arxiv.org/html/2310.13029) and
+  [arXiv:2310.12809](https://arxiv.org/abs/2310.12809).
+* Intermittent-demand methods:
+  [arXiv:2103.08250](https://arxiv.org/abs/2103.08250).
+* Retail replenishment and lateral transshipment:
+  [arXiv:2410.18571](https://arxiv.org/abs/2410.18571).
+* Deep RL is deliberately not used in the daily approval loop; it needs a
+  validated simulator and a different operating objective:
+  [arXiv:2306.11246](https://arxiv.org/abs/2306.11246).
+
+## Dataset availability
+
+Uploaded workbooks, approval history, and any local sample bundle live under
+the git-ignored `data/` directory. They are intentionally excluded from source
+control; load the hackathon dataset through the app to generate current
+recommendations and analytics.
