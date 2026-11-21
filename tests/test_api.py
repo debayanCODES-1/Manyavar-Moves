@@ -8,6 +8,7 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from starlette.requests import Request
 from openpyxl import Workbook
@@ -54,6 +55,23 @@ def api_fixture():
 
 
 class APIUploadTests(unittest.TestCase):
+    def test_public_demo_viewer_can_sign_in_without_token_but_write_roles_require_it(self):
+        with patch.object(api, "DEMO_MODE", True), \
+                patch.object(api, "APPROVAL_TOKEN", "team-access-token"), \
+                patch.object(api, "SESSION_SECRET", "test-session-secret"):
+            viewer = api.demo_login(api.DemoLoginRequest(role="viewer"))
+            self.assertEqual(viewer.status_code, 200)
+            self.assertEqual(json.loads(viewer.body)["user"]["permissions"], ["read"])
+
+            with self.assertRaises(HTTPException) as raised:
+                api.demo_login(api.DemoLoginRequest(role="stock_manager"))
+            self.assertEqual(raised.exception.status_code, 401)
+
+            manager = api.demo_login(api.DemoLoginRequest(
+                role="stock_manager", token="team-access-token",
+            ))
+            self.assertEqual(manager.status_code, 200)
+
     def test_vercel_run_recalculates_the_persisted_dataset_without_a_blob_source(self):
         tables = api_fixture()
         state = {

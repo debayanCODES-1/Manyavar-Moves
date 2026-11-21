@@ -69,6 +69,19 @@ async function api(path, options = {}) {
   return result;
 }
 
+function updateDemoRoleControls() {
+  const demoRole = $("#demo-role");
+  const isAreaManager = demoRole.value === "area_manager";
+  $("#area-manager-label").hidden = !authState.demoMode || !isAreaManager;
+  $("#area-manager-account").hidden = !authState.demoMode || !isAreaManager;
+  const tokenRequired = authState.demoMode
+    ? Boolean(authState.tokenRequired && demoRole.value !== "viewer")
+    : Boolean(authState.required);
+  $("#token-label").hidden = !tokenRequired;
+  $("#auth-token").hidden = !tokenRequired;
+  $("#auth-token").required = tokenRequired;
+}
+
 async function updateAuthState() {
   try {
     Object.assign(authState, await api("/api/auth/status"));
@@ -84,12 +97,7 @@ async function updateAuthState() {
     $("#current-user-label").textContent = authState.user?.name || (authState.required ? "Sign in" : "Local workspace");
     const demoRole = $("#demo-role");
     demoRole.hidden = !authState.demoMode;
-    $("#area-manager-label").hidden = !authState.demoMode || demoRole.value !== "area_manager";
-    $("#area-manager-account").hidden = !authState.demoMode || demoRole.value !== "area_manager";
-    const tokenRequired = Boolean(authState.tokenRequired || (!authState.demoMode && authState.required));
-    $("#token-label").hidden = !tokenRequired;
-    $("#auth-token").hidden = !tokenRequired;
-    $("#auth-token").required = tokenRequired;
+    updateDemoRoleControls();
     applyPermissions();
   } catch {
     authState.required = false;
@@ -952,9 +960,7 @@ $("#auth-button").addEventListener("click", async () => {
   $("#demo-role").focus();
 });
 $("#demo-role").addEventListener("change", () => {
-  const isAreaManager = $("#demo-role").value === "area_manager";
-  $("#area-manager-label").hidden = !isAreaManager;
-  $("#area-manager-account").hidden = !isAreaManager;
+  updateDemoRoleControls();
 });
 $("#auth-close").addEventListener("click", () => {
   if (authState.required && !authState.authenticated) return;

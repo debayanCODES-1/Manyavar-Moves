@@ -84,9 +84,8 @@ fetch new ERP/WMS data.
 3. Add these variables in Vercel → Project Settings → Environment Variables:
 
    * `APP_SESSION_SECRET`: a long random secret used to sign eight-hour sessions.
-   * `APPROVAL_TOKEN`: a separate long random team access token. Demo role
-     sign-in requires it when configured; keep it private and share it only
-     with intended testers.
+   * `APPROVAL_TOKEN`: a separate long random team access token. The public
+     read-only viewer demo does not need it; elevated demo roles do.
    * `CRON_SECRET`: a separate long random value protecting the scheduled run.
    * `DEMO_MODE`: `true` to enable the role-based demo login.
    * `GEMINI_API_KEY`: optional, server-side only.
@@ -237,7 +236,7 @@ tier/category display minimum rather than inventing a required size assortment.
 |---|---|---|
 | `GEMINI_API_KEY` | Gemini API key for the optional Q&A feature | unset |
 | `DEMO_MODE` | Enable role-based demo sessions | `true` |
-| `APPROVAL_TOKEN` | Team access token for demo sign-in or token-only login | unset |
+| `APPROVAL_TOKEN` | Team access token for elevated demo roles or token-only login | unset |
 | `APP_SESSION_SECRET` | HMAC secret for the HttpOnly, 8-hour session cookie | random per process in local mode |
 | `CRON_SECRET` | Bearer secret for the scheduled Vercel refresh | required on Vercel |
 | `DATABASE_URL` | Neon Postgres connection string for persistent state | required on Vercel |
@@ -250,8 +249,10 @@ tier/category display minimum rather than inventing a required size assortment.
 | `PORT` | Node gateway listen port | `3000` |
 
 Local demo mode is intentionally open and is not production authentication.
-For a shared Vercel demo, keep `DEMO_MODE=true` and set a private
-`APPROVAL_TOKEN`, `APP_SESSION_SECRET`, and `CRON_SECRET`. For a self-hosted
+For a shared Vercel demo, keep `DEMO_MODE=true`. The read-only viewer login is
+available without a token; set a private `APPROVAL_TOKEN` to restrict roles
+that can upload, run, or approve changes. Also set `APP_SESSION_SECRET` and
+`CRON_SECRET`. For a self-hosted
 team deployment, set `DEMO_MODE=false`, configure an access token and a
 separate session secret, and terminate HTTPS at a trusted reverse proxy. The
 FastAPI port should remain private; the included Compose setup exposes only

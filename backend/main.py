@@ -337,8 +337,12 @@ def demo_login(payload: DemoLoginRequest) -> JSONResponse:
         raise HTTPException(404, "Demo sign-in is disabled.")
     if payload.role not in _ROLE_PERMISSIONS:
         raise HTTPException(400, "Choose a valid demo role.")
-    if APPROVAL_TOKEN and not hmac.compare_digest(payload.token, APPROVAL_TOKEN):
-        raise HTTPException(401, "A valid team access token is required.")
+    if (
+        APPROVAL_TOKEN
+        and payload.role != "viewer"
+        and not hmac.compare_digest(payload.token, APPROVAL_TOKEN)
+    ):
+        raise HTTPException(401, "A valid team access token is required for this role.")
     if payload.role == "area_manager" and not re.fullmatch(
         r"AM-\d{2}", payload.area_manager_id or "",
     ):

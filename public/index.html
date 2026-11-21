@@ -208,16 +208,16 @@
         <button class="dialog-close" type="button" id="auth-close" aria-label="Close">×</button>
         <span class="eyebrow muted-eyebrow">MERCHANDISING ACCESS</span>
         <h2 id="auth-title">Choose your demo workspace.</h2>
-        <p id="auth-description">Sign in as a merchandising role. Demo sessions are permission-aware and expire after eight hours.</p>
+        <p id="auth-description">Enter the read-only public demo without a token. A team token is required for roles that change data. Sessions expire after eight hours.</p>
         <div id="role-auth-controls">
         <label for="demo-role">Workspace role</label>
         <select id="demo-role">
+          <option value="viewer" selected>Public demo · read-only</option>
           <option value="admin">Admin · full demo access</option>
           <option value="stock_manager">Stock manager · upload, run, approve</option>
           <option value="validator">Validator · approve and decline moves</option>
           <option value="area_manager">Area manager · assigned store approvals</option>
           <option value="analyst">Analyst · read dashboards and ask the copilot</option>
-          <option value="viewer">Viewer · read-only</option>
         </select>
         <label id="area-manager-label" for="area-manager-account" hidden>Area manager account</label>
         <select id="area-manager-account" hidden><option value="AM-01">AM-01</option><option value="AM-02">AM-02</option><option value="AM-03">AM-03</option><option value="AM-04">AM-04</option><option value="AM-05">AM-05</option><option value="AM-06">AM-06</option></select>
