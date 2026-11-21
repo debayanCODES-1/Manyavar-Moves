@@ -1851,6 +1851,17 @@ async def run() -> dict[str, Any]:
             raise HTTPException(422, f"Analysis failed: {exc}") from exc
         finally:
             temporary.unlink(missing_ok=True)
+    if IS_VERCEL:
+        tables = state.get("tables")
+        if tables is None:
+            raise HTTPException(409, "The current dataset is no longer available.")
+        await asyncio.to_thread(
+            _run_analysis_tables,
+            tables,
+            source,
+            is_demo_data=bool(state.get("is_demo_data")),
+        )
+        return {"ok": True, **_summary(tables)}
     candidates = sorted(DATA_DIR.glob("dataset-*"), key=lambda path: path.stat().st_mtime, reverse=True)
     if not candidates:
         if state.get("is_demo_data") and state.get("tables") is not None:

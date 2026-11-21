@@ -1,3 +1,4 @@
+import asyncio
 import io
 import json
 import sqlite3
@@ -53,6 +54,26 @@ def api_fixture():
 
 
 class APIUploadTests(unittest.TestCase):
+    def test_vercel_run_recalculates_the_persisted_dataset_without_a_blob_source(self):
+        tables = api_fixture()
+        state = {
+            "source_name": "Generated synthetic demo data",
+            "source_blob_path": None,
+            "tables": tables,
+            "is_demo_data": True,
+        }
+        with patch.object(api, "IS_VERCEL", True), \
+                patch.object(api, "state", state), \
+                patch.object(api, "_run_analysis_tables") as analyze, \
+                patch.object(api, "_summary", return_value={"has_data": True}):
+            result = asyncio.run(api.run())
+
+        analyze.assert_called_once_with(
+            tables, "Generated synthetic demo data", is_demo_data=True,
+        )
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["has_data"])
+
     def test_signed_session_accepts_valid_token_and_rejects_tampering(self):
         with patch.object(api, "SESSION_SECRET", "test-session-secret"):
             response = api._session_response("analyst", "Test Analyst")
