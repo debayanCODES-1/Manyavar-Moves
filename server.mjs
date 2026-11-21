@@ -150,6 +150,7 @@ function requestPermission(method, pathname) {
   if (pathname === "/api/run" && method === "POST") return "run";
   if (pathname === "/api/ask" && method === "POST") return "ask";
   if (pathname.startsWith("/api/recommendations/") && method === "PATCH") return "approve";
+  if (pathname.startsWith("/api/logistics/") && method === "POST") return "approve";
   return null;
 }
 

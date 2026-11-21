@@ -21,6 +21,7 @@
         <div class="workspace-label">MERCHANDISING</div>
         <nav class="primary-nav" aria-label="Main navigation">
           <button class="nav-link active" data-view="overview"><span class="nav-icon">◫</span> Overview</button>
+          <button class="nav-link" data-view="logistics"><span class="nav-icon">⇢</span> Logistics</button>
           <button class="nav-link" data-view="moves"><span class="nav-icon">⇄</span> Move approvals <i id="nav-pending">—</i></button>
           <button class="nav-link" data-view="stores"><span class="nav-icon">⌂</span> Store network</button>
           <button class="nav-link" data-view="products"><span class="nav-icon">◇</span> Product intelligence</button>
@@ -101,6 +102,14 @@
           <footer class="page-footer">Designed for the daily rhythm of good merchandising <span>✳</span></footer>
         </section>
 
+        <section class="view" id="logistics-view">
+          <div class="page-title-row"><div><span class="eyebrow muted-eyebrow">ONE KOLKATA WAREHOUSE · EVERY STORE</span><h1>Logistics, step by step<span class="heading-period">.</span></h1><p>Automation ranks safe moves; a person validates each recommendation and confirms receipt.</p></div><button class="button button-outline" id="refresh-logistics">↻ Refresh logistics</button></div>
+          <div class="logistics-summary" id="logistics-summary"></div>
+          <section class="panel logistics-next-panel"><div class="panel-heading"><div><span class="eyebrow muted-eyebrow">NEXT AUTOMATED RECOMMENDATION</span><h2>Ready for a person to validate</h2></div><a class="text-button" href="#" data-go="moves">All move approvals →</a></div><div id="logistics-next"></div></section>
+          <section class="logistics-section"><div class="panel-heading"><div><span class="eyebrow muted-eyebrow">APPROVED · AWAITING RECEIPT</span><h2>Ongoing logistics</h2></div><span class="logistics-count" id="logistics-ongoing-count">0</span></div><div class="logistics-list" id="logistics-ongoing"></div></section>
+          <section class="logistics-section completed-section"><div class="panel-heading"><div><span class="eyebrow muted-eyebrow">HUMAN-VALIDATED RECEIPT</span><h2>Completed logistics</h2></div><span class="logistics-count" id="logistics-completed-count">0</span></div><div class="logistics-list" id="logistics-completed"></div></section>
+        </section>
+
         <section class="view" id="moves-view">
           <div class="page-title-row"><div><span class="eyebrow muted-eyebrow">THE APPROVAL QUEUE</span><h1>Moves worth making<span class="heading-period">.</span></h1><p>Every recommendation is dated, explained, and checked against your rules.</p></div><a class="button button-outline" href="/api/export?format=csv">↓ Export list</a></div>
           <div class="filter-row">
@@ -157,7 +166,7 @@
           <section class="panel science-panel"><div class="panel-heading"><div><span class="eyebrow muted-eyebrow">THE METHOD, IN PLAIN LANGUAGE</span><h3>From velocity to a move</h3></div></div>
             <div class="science-steps"><div><i>01</i><strong>Learn what sells</strong><p>Fit a pooled Tweedie model when LightGBM is available, correcting observed units by in-stock days. Festival, wedding, store tier and product features are included.</p></div><div><i>02</i><strong>Allocate with purpose</strong><p>Use expected margin and urgency to prioritize shortages; a binary MILP selects among safe proposals when SciPy is installed.</p></div><div><i>03</i><strong>Prove each rule</strong><p>Python checks the proposed moves against display minimums, protected S++ styles, 30-day donor cover, in-transit stock and store capacity.</p></div><div><i>04</i><strong>Keep a human in charge</strong><p>Gemini can answer questions about computed results; it never calculates stock, edits a move, or approves one on a person's behalf.</p></div></div>
           </section>
-          <section class="panel chat-panel"><div><span class="eyebrow muted-eyebrow">ASK YOUR MERCHANDISING COPILOT</span><h3>Curious about a recommendation?</h3><p>Gemini explains the calculated numbers and context. It does not invent a stock position.</p></div><form id="chat-form"><textarea id="chat-question" rows="2" placeholder="Why is this store receiving this style?"></textarea><button class="button button-rust" type="submit">Ask Gemini <span>→</span></button></form><div id="chat-answer" class="chat-answer" aria-live="polite"></div></section>
+          <section class="panel chat-panel"><div><span class="eyebrow muted-eyebrow">ASK YOUR MERCHANDISING COPILOT</span><h3>Curious about a recommendation?</h3><p>Answers use backend-calculated data. Gemini is optional; local computed answers remain available if it is not configured or cannot respond.</p></div><form id="chat-form"><textarea id="chat-question" rows="2" placeholder="Why is this store receiving this style?"></textarea><button class="button button-rust" type="submit">Ask copilot <span>→</span></button></form><div id="chat-answer" class="chat-answer" aria-live="polite"></div></section>
         </section>
 
         <section class="view" id="data-view">
@@ -170,6 +179,7 @@
             </section>
             <section class="panel guide-panel"><span class="eyebrow muted-eyebrow">WHAT THE ENGINE NEEDS</span><h3>Every table has a part to play.</h3><div class="table-guide">
               <div><b>NETWORK</b><span>stores · area_managers · items</span></div><div><b>SELL-THROUGH</b><span>bills · bill_lines · stock_weekly</span></div><div><b>ON-HAND</b><span>stock_snapshot · warehouse_inbound</span></div><div><b>GUARDRAILS</b><span>min_display · lead_times · flagship_protected</span></div><div><b>SEASONALITY</b><span>calendar (festivals and wedding dates)</span></div>
+              <div><b>IN-STORE</b><span>salespeople · roster_daily · footfall_daily</span></div>
             </div><div class="guide-note"><span>✦</span><span>Use the shared hackathon data guide for column names and ID joins. The service validates required tables and rules before recommendations are produced.</span></div></section>
           </div>
           <section class="panel rules-panel"><div class="panel-heading"><div><span class="eyebrow muted-eyebrow">RULES ARE NOT SUGGESTIONS</span><h3>Always-on safeguards</h3></div><span class="panel-icon">✓</span></div>          <div class="rule-grid"><div><b>01</b><strong>Keep the display</strong><span>Every tier keeps its minimum units for each category.</span></div><div><b>02</b><strong>Respect the flagship</strong><span>S++ protected top-20 styles never leave their store.</span></div><div><b>03</b><strong>Count what is coming</strong><span>In-transit units count toward projected store stock.</span></div><div><b>04</b><strong>Leave room to sell</strong><span>Never exceed a store's stated unit capacity.</span></div><div><b>05</b><strong>Protect donor cover</strong><span>Store-to-store moves leave 30+ days of donor cover.</span></div><div><b>06</b><strong>Human approval</strong><span>Moves above ₹1,00,000 at MRP require a human decision.</span></div><div><b>07</b><strong>Explain every move</strong><span>Each recommendation includes one clear, numeric reason.</span></div></div></section>
@@ -188,7 +198,7 @@
           <option value="stock_manager">Stock manager · upload, run, approve</option>
           <option value="validator">Validator · approve and decline moves</option>
           <option value="area_manager">Area manager · assigned store approvals</option>
-          <option value="analyst">Analyst · read dashboards and ask Gemini</option>
+          <option value="analyst">Analyst · read dashboards and ask the copilot</option>
           <option value="viewer">Viewer · read-only</option>
         </select>
         <label id="area-manager-label" for="area-manager-account" hidden>Area manager account</label>

@@ -27,8 +27,10 @@ sys.path.insert(0, str(ROOT))
 
 from stock_mover import (  # noqa: E402
     DEFAULT_AGE_DAYS, WAREHOUSE, approval_threshold_from_rules, as_date, as_number,
-    build_recommendations, field, load_tables, validate_proposal_selection,
+    build_lead_time_overrides, build_recommendations, field, load_tables,
+    validate_proposal_selection,
 )
+from backend.app.demo_data import build_demo_tables  # noqa: E402
 from backend.app.forecast import forecast_velocity  # noqa: E402
 from backend.app.optimizer import optimize_proposals  # noqa: E402
 
@@ -40,6 +42,7 @@ app = FastAPI(title="Manyavar Stock Mover API", version="1.0.0")
 state: dict[str, Any] = {
     "tables": None, "moves": [], "model": {}, "optimizer": {},
     "source_name": None, "generated_at": None, "approvals": {},
+    "is_demo_data": False,
     "products": {}, "sales_weekly": {}, "stock_weekly": {}, "bill_summaries": [],
     "sku_store_sales_weekly": {}, "sku_store_stock_weekly": {},
 }
@@ -47,6 +50,15 @@ state: dict[str, Any] = {
 
 class Decision(BaseModel):
     status: str = Field(pattern="^(approved|rejected|pending)$")
+    note: str = Field(default="", max_length=500)
+    validated: bool = False
+    validated_qty: int | None = Field(default=None, ge=0)
+
+
+class LogisticsCompletion(BaseModel):
+    received_qty: int = Field(ge=0)
+    sku_verified: bool
+    route_verified: bool
     note: str = Field(default="", max_length=500)
 
 
@@ -109,56 +121,6 @@ def _read_source(path: Path) -> dict[str, list[dict[str, Any]]]:
                     (folder / basename).write_bytes(archive.read(entry))
             return load_tables(folder)
     return load_tables(path)
-
-
-def _route_lead_overrides(tables: dict[str, list[dict[str, Any]]]) -> dict[tuple[str, str], int]:
-    stores = {str(field(row, "store_id", default="")): row for row in tables["stores"]}
-    routes = [
-        (str(field(row, "route", "move_type", default="")).casefold(),
-         max(0, int(as_number(field(row, "days", "lead_time_days", "lead_days")))))
-        for row in tables["lead_times"]
-    ]
-
-    def warehouse_days(zone: str) -> int:
-        aliases = {
-            "north": ("north", "up"),
-            "east": ("east", "bihar"),
-            "south": ("south", "karnataka"),
-        }.get(zone.casefold(), (zone.casefold(),))
-        for route, days in routes:
-            if "warehouse" in route and "store" in route and any(alias in route for alias in aliases):
-                return days
-        return max((days for route, days in routes if "warehouse" in route and "store" in route),
-                   default=0)
-
-    def store_days(source: dict[str, Any], target: dict[str, Any]) -> int:
-        same_city = str(field(source, "city", default="")).casefold() == str(
-            field(target, "city", default="")).casefold()
-        same_zone = str(field(source, "zone", default="")).casefold() == str(
-            field(target, "zone", default="")).casefold()
-        if same_city:
-            selector = "same city"
-        elif same_zone:
-            selector = "same zone"
-        else:
-            selector = "different zone"
-        for route, days in routes:
-            if "store to store" in route and selector in route:
-                if selector != "same zone" or "different city" in route:
-                    return days
-        return max((days for route, days in routes if "store to store" in route), default=0)
-
-    overrides = {}
-    for store_id, store in stores.items():
-        zone = str(field(store, "zone", default=""))
-        route_days = warehouse_days(zone)
-        overrides[WAREHOUSE, store_id] = route_days
-        # The guide contains warehouse-to-zone transit times, so return trips use the same leg.
-        overrides[store_id, WAREHOUSE] = route_days
-        for target_id, target in stores.items():
-            if target_id != store_id:
-                overrides[store_id, target_id] = store_days(store, target)
-    return overrides
 
 
 def _build_analytics(tables: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
@@ -362,12 +324,16 @@ def _build_analytics(tables: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
 
 
 def _run_analysis(path: Path, source_name: str | None = None) -> None:
-    tables = _read_source(path)
+    _run_analysis_tables(_read_source(path), source_name or path.name)
+
+
+def _run_analysis_tables(tables: dict[str, list[dict[str, Any]]],
+                         source_name: str, is_demo_data: bool = False) -> None:
     velocity, model_meta = forecast_velocity(tables)
     age_threshold = int(os.environ.get("AGE_THRESHOLD_DAYS", DEFAULT_AGE_DAYS))
     raw_moves = build_recommendations(tables, age_threshold=age_threshold,
                                      velocity_override=velocity,
-                                     lead_time_overrides=_route_lead_overrides(tables))
+                                     lead_time_overrides=build_lead_time_overrides(tables))
     optimized, optimizer_meta = optimize_proposals(raw_moves, tables)
     validate_proposal_selection(optimized, tables)
     analytics = _build_analytics(tables)
@@ -390,15 +356,25 @@ def _run_analysis(path: Path, source_name: str | None = None) -> None:
         encoded = "|".join(str(move.get(column, "")) for column in (
             "move_type", "from_location", "to_location", "sku_id", "qty", "arrival_date"))
         move["id"] = hashlib.sha256(encoded.encode()).hexdigest()[:16]
-        move["decision"] = state["approvals"].get(move["id"], {}).get("status", "pending")
-        move["decision_note"] = state["approvals"].get(move["id"], {}).get("note", "")
-        move["decision_actor"] = state["approvals"].get(move["id"], {}).get("actor", "")
-        move["decision_role"] = state["approvals"].get(move["id"], {}).get("role", "")
+        approval = state["approvals"].get(move["id"], {})
+        move["decision"] = approval.get("status", "pending")
+        move["decision_note"] = approval.get("note", "")
+        move["decision_actor"] = approval.get("actor", "")
+        move["decision_role"] = approval.get("role", "")
+        move["decision_validated"] = bool(approval.get("validated"))
+        move["logistics_status"] = (
+            "awaiting_approval" if move["decision"] == "pending"
+            else "declined" if move["decision"] == "rejected"
+            else "completed" if approval.get("completion")
+            else "ongoing"
+        )
+        move["completion"] = approval.get("completion")
         enriched.append(move)
     state.update({
         "tables": tables, "moves": enriched, "model": model_meta,
-        "optimizer": optimizer_meta, "source_name": source_name or path.name,
+        "optimizer": optimizer_meta, "source_name": source_name,
         "generated_at": datetime.now(timezone.utc).isoformat(),
+        "is_demo_data": is_demo_data,
         "approval_threshold_mrp": approval_limit,
         **analytics,
     })
@@ -496,6 +472,7 @@ def _summary(tables: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
     return {
         "has_data": True,
         "source_name": state["source_name"],
+        "is_demo_data": state["is_demo_data"],
         "generated_at": state["generated_at"],
         "period_start": date_min.isoformat() if date_min else None,
         "period_end": date_max.isoformat() if date_max else None,
@@ -630,7 +607,11 @@ def _insights(tables: dict[str, list[dict[str, Any]]]) -> list[dict[str, Any]]:
 
 @app.get("/health")
 def health() -> dict[str, Any]:
-    return {"status": "ok", "has_data": state["tables"] is not None}
+    return {
+        "status": "ok",
+        "has_data": state["tables"] is not None,
+        "is_demo_data": state["is_demo_data"],
+    }
 
 
 @app.post("/api/upload")
@@ -663,6 +644,9 @@ def run() -> dict[str, Any]:
         raise HTTPException(409, "Upload a dataset before running recommendations.")
     candidates = sorted(DATA_DIR.glob("dataset-*"), key=lambda path: path.stat().st_mtime, reverse=True)
     if not candidates:
+        if state.get("is_demo_data") and state.get("tables") is not None:
+            _run_analysis_tables(state["tables"], "Generated synthetic demo data", is_demo_data=True)
+            return {"ok": True, **_summary(state["tables"])}
         raise HTTPException(409, "The uploaded source file is no longer available.")
     try:
         _run_analysis(candidates[0], source)
@@ -750,6 +734,47 @@ def recommendations(
     return {"total": len(result), "items": result[:limit]}
 
 
+@app.get("/api/logistics")
+def logistics(
+    actor_role: str | None = Header(None, alias="x-stockmover-role"),
+    area_manager_id: str | None = Header(None, alias="x-stockmover-area-manager"),
+) -> dict[str, Any]:
+    _require_data()
+    current_moves = {row["id"]: row for row in state["moves"]}
+    awaiting = [row for row in state["moves"] if row["decision"] == "pending"]
+    active_moves = []
+    for move_id, approval in state["approvals"].items():
+        if approval.get("status") != "approved":
+            continue
+        move = current_moves.get(move_id) or approval.get("move_snapshot")
+        if not move:
+            continue
+        move = dict(move)
+        move["decision"] = "approved"
+        move["completion"] = approval.get("completion")
+        move["logistics_status"] = "completed" if approval.get("completion") else "ongoing"
+        active_moves.append(move)
+    if actor_role == "area_manager" and area_manager_id:
+        stores_for_manager = _area_store_ids(area_manager_id)
+        awaiting = [row for row in awaiting
+                    if row["from_location"] in stores_for_manager
+                    or row["to_location"] in stores_for_manager]
+        active_moves = [row for row in active_moves
+                        if row["from_location"] in stores_for_manager
+                        or row["to_location"] in stores_for_manager]
+    ongoing = [row for row in active_moves if row["logistics_status"] == "ongoing"]
+    completed = [row for row in active_moves if row["logistics_status"] == "completed"]
+    completed.sort(
+        key=lambda row: row["completion"].get("completed_at", ""), reverse=True,
+    )
+    return {
+        "next_move": awaiting[0] if awaiting else None,
+        "awaiting_count": len(awaiting),
+        "ongoing": ongoing,
+        "completed": completed,
+    }
+
+
 @app.patch("/api/recommendations/{move_id}")
 def decide(
     move_id: str,
@@ -766,9 +791,23 @@ def decide(
         managed_stores = _area_store_ids(area_manager_id)
         if move["from_location"] not in managed_stores and move["to_location"] not in managed_stores:
             raise HTTPException(403, "Area managers can only decide moves involving their assigned stores.")
+    if move["logistics_status"] == "completed" and decision.status != "approved":
+        raise HTTPException(409, "A completed logistics move cannot have its approval changed.")
+    if decision.status == "approved" and (
+        not decision.validated or decision.validated_qty != move["qty"]
+    ):
+        raise HTTPException(
+            422, "Validate the displayed SKU, route and exact recommended quantity before approval."
+        )
     state["approvals"][move_id] = {
         "status": decision.status, "note": decision.note,
         "actor": actor or "Merchandising team", "role": actor_role or "unspecified",
+        "validated": decision.status == "approved",
+        "validated_qty": decision.validated_qty if decision.status == "approved" else None,
+        "validated_at": datetime.now(timezone.utc).isoformat()
+        if decision.status == "approved" else None,
+        "completion": move.get("completion") if decision.status == "approved" else None,
+        "move_snapshot": dict(move) if decision.status == "approved" else None,
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
     _write_decisions()
@@ -776,6 +815,56 @@ def decide(
     move["decision_note"] = decision.note
     move["decision_actor"] = actor or "Merchandising team"
     move["decision_role"] = actor_role or "unspecified"
+    move["decision_validated"] = decision.status == "approved"
+    move["logistics_status"] = (
+        "awaiting_approval" if decision.status == "pending"
+        else "declined" if decision.status == "rejected"
+        else "completed" if state["approvals"][move_id]["completion"]
+        else "ongoing"
+    )
+    return {"ok": True, "item": move}
+
+
+@app.post("/api/logistics/{move_id}/complete")
+def complete_logistics(
+    move_id: str,
+    completion: LogisticsCompletion,
+    actor: str | None = Header(None, alias="x-stockmover-user"),
+    actor_role: str | None = Header(None, alias="x-stockmover-role"),
+    area_manager_id: str | None = Header(None, alias="x-stockmover-area-manager"),
+) -> dict[str, Any]:
+    _require_data()
+    move = next((row for row in state["moves"] if row["id"] == move_id), None)
+    if move is None:
+        raise HTTPException(404, "Recommendation not found.")
+    if actor_role == "area_manager":
+        managed_stores = _area_store_ids(area_manager_id)
+        if move["from_location"] not in managed_stores and move["to_location"] not in managed_stores:
+            raise HTTPException(403, "Area managers can only validate moves involving their assigned stores.")
+    if move["decision"] != "approved":
+        raise HTTPException(409, "Approve the recommendation before recording logistics completion.")
+    if move["logistics_status"] == "completed":
+        raise HTTPException(409, "This logistics move is already completed.")
+    if completion.received_qty != move["qty"]:
+        raise HTTPException(422, "Received quantity must match the validated recommendation quantity.")
+    if not completion.sku_verified or not completion.route_verified:
+        raise HTTPException(422, "Verify the SKU and route against the recommendation before completion.")
+
+    completed_at = datetime.now(timezone.utc).isoformat()
+    approval = state["approvals"][move_id]
+    approval["completion"] = {
+        "received_qty": completion.received_qty,
+        "sku_verified": completion.sku_verified,
+        "route_verified": completion.route_verified,
+        "note": completion.note,
+        "actor": actor or "Merchandising team",
+        "role": actor_role or "unspecified",
+        "completed_at": completed_at,
+    }
+    approval["updated_at"] = completed_at
+    _write_decisions()
+    move["completion"] = approval["completion"]
+    move["logistics_status"] = "completed"
     return {"ok": True, "item": move}
 
 
@@ -1081,16 +1170,140 @@ def export(
                              headers={"Content-Disposition": 'attachment; filename="moves.csv"'})
 
 
+def _local_answer(question: str, actor_role: str | None,
+                  area_manager_id: str | None) -> dict[str, Any]:
+    metrics = summary(actor_role, area_manager_id)
+    query = question.casefold()
+    model = metrics["model"]
+    prefix = "Synthetic demo data: " if metrics.get("is_demo_data") else ""
+    pending_moves = [row for row in state["moves"] if row["decision"] == "pending"]
+    if actor_role == "area_manager":
+        managed = _area_store_ids(area_manager_id)
+        pending_moves = [row for row in pending_moves
+                         if row["from_location"] in managed or row["to_location"] in managed]
+
+    if any(word in query for word in ("model", "forecast", "train", "accuracy", "wape")):
+        validation = model.get("validation", {})
+        if validation.get("wape") is not None:
+            answer = (
+                f"The {model.get('model', 'demand')} model is {model.get('status', 'not run')}. "
+                f"It trained on {int(as_number(model.get('training_rows'))):,} observed "
+                f"SKU-week rows. Its two-week holdout WAPE was {validation['wape']:.1%}, "
+                f"compared with {validation.get('naive_wape', 0):.1%} for the recent-rate "
+                "baseline. The selected forecast source is "
+                f"{model.get('forecast_source', model.get('model', 'baseline'))}."
+            )
+        else:
+            answer = (
+                f"The model is using {model.get('model', 'the available baseline')}: "
+                f"{model.get('reason', 'no validation metrics are available yet')} "
+                f"It has {int(as_number(model.get('training_rows'))):,} training rows."
+            )
+    elif any(word in query for word in ("next", "recommend", "move", "transfer", "should")):
+        if pending_moves:
+            move = pending_moves[0]
+            answer = (
+                f"Next rule-checked move: {move['sku_id']} ({move['style_name']}), "
+                f"{move['qty']} units from {move['from_location']} to {move['to_location']}; "
+                f"expected {move['arrival_date']}. Priority {move['priority']}. "
+                f"{move['reason']} A person must validate it before approval."
+            )
+        else:
+            answer = "There are no pending rule-checked moves in your current view."
+    elif "warehouse" in query or "wh-kol" in query:
+        warehouse_moves = [row for row in pending_moves
+                           if row["move_type"] == "WAREHOUSE_TO_STORE"]
+        answer = (
+            f"WH-KOL has {int(as_number(metrics['warehouse_units'])):,} units on hand or in transit. "
+            f"{len(warehouse_moves)} pending recommendation(s) use warehouse stock."
+        )
+        if warehouse_moves:
+            move = warehouse_moves[0]
+            answer += (
+                f" The highest-ranked is {move['sku_id']}: {move['qty']} units to "
+                f"{move['to_location']}, arriving {move['arrival_date']}."
+            )
+    elif any(term in query for term in ("top store", "best store", "highest sales", "top selling")):
+        leaders = sorted(
+            metrics["stores_summary"], key=lambda row: row["sales_revenue"], reverse=True,
+        )[:3]
+        answer = "Top stores by recorded sales: " + "; ".join(
+            f"{row['store_id']} ({rupee(row['sales_revenue'])})" for row in leaders
+        ) + "."
+    else:
+        store = next(
+            (row for row in metrics["stores_summary"] if row["store_id"].casefold() in query),
+            None,
+        )
+        if store:
+            answer = (
+                f"{store['store_id']} ({store['city']}, {store['tier']}) has "
+                f"{int(as_number(store['stock_units'])):,} units, is at "
+                f"{store['capacity_pct']}% of capacity, and recorded "
+                f"{rupee(store['sales_revenue'])} in sales. Area manager: "
+                f"{store['area_manager_id']}."
+            )
+        else:
+            city_stores = [
+                row for row in metrics["stores_summary"] if row["city"].casefold() in query
+            ]
+            if city_stores:
+                total_stock = sum(row["stock_units"] for row in city_stores)
+                total_revenue = sum(row["sales_revenue"] for row in city_stores)
+                answer = (
+                    f"{city_stores[0]['city']} has {len(city_stores)} store(s), "
+                    f"{int(total_stock):,} units, and {rupee(total_revenue)} in recorded sales."
+                )
+            else:
+                managed = _area_store_ids(area_manager_id) if actor_role == "area_manager" else None
+                product = None
+                for sku_id, source_product in state["products"].items():
+                    item = (
+                        _scoped_product(source_product, managed)
+                        if managed is not None else source_product
+                    )
+                    if (sku_id.casefold() in query
+                            or str(item.get("style_id", "")).casefold() in query
+                            or str(item.get("style_name", "")).casefold() in query):
+                        product = item
+                        break
+                if product:
+                    velocity = product["recent_velocity"]
+                    answer = (
+                        f"{product['sku_id']} ({product.get('style_name', product['sku_id'])}, "
+                        f"{product.get('category', 'uncategorized')}) has "
+                        f"{int(as_number(product['store_stock_units'])):,} store units and "
+                        f"{int(as_number(product['warehouse_units'])):,} WH-KOL units. "
+                        f"Recent availability-corrected velocity is "
+                        f"{velocity if velocity is not None else 'unknown'} units per day."
+                    )
+                else:
+                    answer = (
+                        f"The current network has {metrics['stores']} stores and {metrics['skus']} "
+                        f"SKUs, {int(as_number(metrics['stock_units'])):,} store units, "
+                        f"{metrics['pending']} pending moves, and {rupee(metrics['revenue'])} "
+                        "in recorded sales. Ask about a store, SKU, warehouse, recommendation, "
+                        "or forecast for more detail."
+                    )
+
+    return {
+        "answer": prefix + answer,
+        "provider": "local_computed",
+        "computed_values_are_authoritative": True,
+    }
+
+
 @app.post("/api/ask")
 def ask(
     question: Question,
     actor_role: str | None = Header(None, alias="x-stockmover-role"),
     area_manager_id: str | None = Header(None, alias="x-stockmover-area-manager"),
 ) -> dict[str, Any]:
-    tables = _require_data()
+    _require_data()
+    local_result = _local_answer(question.question, actor_role, area_manager_id)
     api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
     if not api_key:
-        raise HTTPException(503, "Gemini is not configured. Set GEMINI_API_KEY in the backend environment.")
+        return local_result
     metrics = summary(actor_role, area_manager_id)
     pending_moves = [row for row in state["moves"] if row["decision"] == "pending"]
     if actor_role == "area_manager":
@@ -1122,10 +1335,18 @@ def ask(
     try:
         with urllib.request.urlopen(request, timeout=20) as response:
             result = json.loads(response.read())
-        text = result["candidates"][0]["content"]["parts"][0]["text"]
+        candidates = result.get("candidates") if isinstance(result, dict) else None
+        content = candidates[0].get("content") if candidates and isinstance(candidates[0], dict) else None
+        parts = content.get("parts") if isinstance(content, dict) else None
+        text = parts[0].get("text") if parts and isinstance(parts[0], dict) else None
+        if not isinstance(text, str) or not text.strip():
+            return {**local_result, "fallback_reason": "Gemini returned no usable answer."}
         return {"answer": text, "provider": "Gemini", "computed_values_are_authoritative": True}
-    except (urllib.error.URLError, KeyError, IndexError, json.JSONDecodeError) as exc:
-        raise HTTPException(502, f"Gemini request failed: {exc}") from exc
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+        return {
+            **local_result,
+            "fallback_reason": f"Gemini is unavailable ({exc}); returned a computed local answer.",
+        }
 
 
 async def _scheduled_refresh() -> None:
@@ -1140,6 +1361,12 @@ async def _scheduled_refresh() -> None:
                 _run_analysis(files[0], state.get("source_name"))
             except (OSError, ValueError, KeyError, RuntimeError) as exc:
                 print(f"Scheduled recommendation run failed: {exc}", file=sys.stderr)
+        elif state.get("is_demo_data") and state.get("tables") is not None:
+            try:
+                _run_analysis_tables(state["tables"], "Generated synthetic demo data",
+                                     is_demo_data=True)
+            except (ValueError, KeyError, RuntimeError) as exc:
+                print(f"Scheduled demo recommendation run failed: {exc}", file=sys.stderr)
 
 
 @app.on_event("startup")
@@ -1151,4 +1378,10 @@ async def startup() -> None:
             _run_analysis(latest[0], latest[0].name)
         except Exception as exc:
             print(f"Could not load persisted dataset: {exc}", file=sys.stderr)
+    else:
+        try:
+            _run_analysis_tables(build_demo_tables(), "Generated synthetic demo data",
+                                 is_demo_data=True)
+        except (OSError, ValueError, KeyError, RuntimeError) as exc:
+            print(f"Could not calculate the synthetic demo dataset: {exc}", file=sys.stderr)
     asyncio.create_task(_scheduled_refresh())

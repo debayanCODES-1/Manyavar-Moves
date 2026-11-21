@@ -1,7 +1,9 @@
 import unittest
 from datetime import date, timedelta
 
-from stock_mover import build_recommendations, limit_manager_alerts
+from stock_mover import (
+    WAREHOUSE, build_lead_time_overrides, build_recommendations, limit_manager_alerts,
+)
 from backend.app.optimizer import optimize_proposals
 from backend.app.forecast import forecast_velocity
 
@@ -98,6 +100,30 @@ class StockMoverTests(unittest.TestCase):
         candidates = build_recommendations(data)
         self.assertTrue(candidates)
         self.assertEqual(limit_manager_alerts(candidates, data), [])
+
+    def test_kolkata_warehouse_routes_use_store_zone_lead_times(self):
+        data = fixture()
+        data["stores"][0].update(city="Patna", zone="East")
+        data["stores"][1].update(city="Lucknow", zone="North")
+        data["stock_snapshot"][2]["on_hand"] = 100
+        data["lead_times"] = [
+            {"route": "Warehouse WH-KOL to store, East zone (Bihar)", "days": 3},
+            {"route": "Warehouse WH-KOL to store, North zone (UP)", "days": 4},
+            {"route": "Warehouse WH-KOL to store, South zone (Karnataka)", "days": 6},
+            {"route": "Store to store, same city", "days": 2},
+            {"route": "Store to store, same zone, different city", "days": 4},
+            {"route": "Store to store, different zone", "days": 7},
+        ]
+        lead_times = build_lead_time_overrides(data)
+
+        self.assertEqual(lead_times[WAREHOUSE, "REC"], 3)
+        self.assertEqual(lead_times[WAREHOUSE, "DON"], 4)
+        self.assertEqual(lead_times["REC", WAREHOUSE], 3)
+        moves = build_recommendations(data, lead_time_overrides=lead_times)
+        warehouse_move = next(move for move in moves if move["move_type"] == "WAREHOUSE_TO_STORE")
+        self.assertEqual(warehouse_move["from_location"], WAREHOUSE)
+        self.assertEqual(warehouse_move["to_location"], "REC")
+        self.assertEqual(warehouse_move["arrival_date"], "2026-11-03")
 
     def test_milp_optimizer_keeps_feasible_recommendations(self):
         data = fixture()

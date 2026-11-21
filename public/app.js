@@ -89,10 +89,11 @@ function showView(name) {
   $$(".view").forEach((view) => view.classList.toggle("active", view.id === `${name}-view`));
   $$(".nav-link").forEach((link) => link.classList.toggle("active", link.dataset.view === name));
   const labels = {
-    overview: "Overview", moves: "Move approvals", stores: "Store network",
+    overview: "Overview", logistics: "Logistics", moves: "Move approvals", stores: "Store network",
     products: "Product intelligence", bills: "Bill analyzer", model: "Demand & AI", data: "Data & rules",
   };
   $("#breadcrumb-current").textContent = labels[name] || labels.overview;
+  if (name === "logistics") refreshLogistics();
   if (name === "moves") refreshMoves();
   if (name === "products") refreshProducts();
   if (name === "bills") refreshBillAnalysis();
@@ -112,8 +113,8 @@ function updateConnection(connected, hasData) {
 function updateSummary() {
   const data = state.summary;
   if (!data?.has_data) {
-    $("#data-period").textContent = "Upload the shared hackathon dataset to activate live numbers";
-    $("#data-source-name").textContent = "No dataset loaded";
+    $("#data-period").textContent = "Connecting to the backend-computed demo dataset";
+    $("#data-source-name").textContent = "Loading calculated demo data…";
     $(".source-dot").classList.remove("ready");
     $("#kpi-p1").textContent = "Upload data for recommendations";
     $("#nav-pending").textContent = "—";
@@ -122,9 +123,9 @@ function updateSummary() {
   }
   $("#welcome-banner").classList.add("data-loaded");
   $("#data-period").textContent = data.period_start && data.period_end
-    ? `Stock snapshot · ${new Date(`${data.period_end}T00:00:00`).toLocaleDateString("en-IN", { dateStyle: "medium" })}`
+    ? `${data.is_demo_data ? "Synthetic demo · " : ""}Stock snapshot · ${new Date(`${data.period_end}T00:00:00`).toLocaleDateString("en-IN", { dateStyle: "medium" })}`
     : "Dataset loaded";
-  $("#data-source-name").textContent = `${data.source_name || "Uploaded dataset"} · ${number(data.stores)} stores · ${number(data.skus)} SKUs`;
+  $("#data-source-name").textContent = `${data.source_name || "Uploaded dataset"}${data.is_demo_data ? " · SYNTHETIC DEMO" : ""} · ${number(data.stores)} stores · ${number(data.skus)} SKUs`;
   $(".source-dot").classList.add("ready");
   $("#kpi-stock").textContent = number(data.stock_units);
   $("#kpi-warehouse").textContent = number(data.warehouse_units);
@@ -192,6 +193,62 @@ function moveCard(move, index) {
     </div>
     <div class="move-actions"><div class="move-qty">${number(move.qty)}<small>units</small></div>${actionButtons}</div>
   </article>`;
+}
+
+function logisticsMoveCard(move, status) {
+  const isPending = status === "awaiting_approval";
+  const isCompleted = status === "completed";
+  const completion = move.completion;
+  const action = isPending
+    ? can("approve")
+      ? `<div class="action-buttons"><button class="approve-button" data-decision="approved" data-id="${escapeHTML(move.id)}">Validate &amp; approve</button><button class="reject-button" data-decision="rejected" data-id="${escapeHTML(move.id)}">Decline</button></div><small class="validation-hint">Approval confirms the displayed SKU, route and quantity.</small>`
+      : '<span class="move-badge decision-badge">VALIDATOR REVIEW REQUIRED</span>'
+    : isCompleted
+      ? `<div class="completion-audit"><strong>Received ${number(completion.received_qty)} units</strong><span>Validated by ${escapeHTML(completion.actor)} · ${escapeHTML(new Date(completion.completed_at).toLocaleString("en-IN", { dateStyle: "medium", timeStyle: "short" }))}</span>${completion.note ? `<span>${escapeHTML(completion.note)}</span>` : ""}</div>`
+      : `<form class="completion-form" data-complete-id="${escapeHTML(move.id)}">
+          <label>Units received <input type="number" name="received_qty" min="0" step="1" value="${number(move.qty)}" required></label>
+          <label class="verification-check"><input type="checkbox" name="sku_verified" required> SKU and size match</label>
+          <label class="verification-check"><input type="checkbox" name="route_verified" required> Origin and destination match</label>
+          <label>Receipt note <input type="text" name="note" maxlength="500" placeholder="Optional"></label>
+          <button class="button button-rust" type="submit">Confirm receipt &amp; complete</button>
+        </form>`;
+  return `<article class="logistics-card ${isCompleted ? "is-completed" : ""}">
+    <div class="logistics-card-heading"><div><span class="move-badge ${move.priority === "P1" ? "p1" : ""}">${escapeHTML(move.priority)}</span><span class="move-badge">${escapeHTML(moveType(move))}</span></div><span class="logistics-state ${isCompleted ? "complete" : isPending ? "ready" : ""}">${isCompleted ? "COMPLETED" : isPending ? "NEXT TO VALIDATE" : "ONGOING"}</span></div>
+    <h3>${escapeHTML(moveTitle(move))}</h3>
+    <div class="move-sub">${escapeHTML(move.category)} · SKU ${escapeHTML(move.sku_id)}</div>
+    <div class="logistics-route"><span>${escapeHTML(move.from_location)}</span><i>→</i><span>${escapeHTML(move.to_location)}</span><small>Expected ${escapeHTML(new Date(`${move.arrival_date}T00:00:00`).toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" }))}</small></div>
+    <div class="logistics-evidence"><span>RECOMMENDED QTY<strong>${number(move.qty)} units</strong></span><span>MRP VALUE<strong>${rupees(move.move_value_mrp)}</strong></span><span>DEMAND RATE<strong>${escapeHTML(move.daily_velocity)} / day</strong></span></div>
+    <p class="logistics-reason">${escapeHTML(move.reason)}</p>
+    <div class="logistics-action">${action}</div>
+  </article>`;
+}
+
+async function refreshLogistics() {
+  const target = $("#logistics-next");
+  target.innerHTML = '<div class="detail-loading"><span class="spinner"></span><span>Loading the automated move queue…</span></div>';
+  try {
+    const result = await api("/api/logistics");
+    const allMoves = [result.next_move, ...result.ongoing, ...result.completed].filter(Boolean);
+    state.moves = allMoves;
+    $("#logistics-summary").innerHTML = [
+      ["AWAITING VALIDATION", number(result.awaiting_count)],
+      ["ONGOING", number(result.ongoing.length)],
+      ["COMPLETED", number(result.completed.length)],
+    ].map(([label, value]) => `<div class="store-stat"><span>${label}</span><strong>${value}</strong></div>`).join("");
+    target.innerHTML = result.next_move
+      ? logisticsMoveCard(result.next_move, "awaiting_approval")
+      : '<div class="empty-state logistics-empty"><span>✳</span><h3>No move is waiting for validation.</h3><p>The automation has no pending safe recommendations. Refresh after the next analysis run.</p></div>';
+    $("#logistics-ongoing-count").textContent = number(result.ongoing.length);
+    $("#logistics-ongoing").innerHTML = result.ongoing.length
+      ? result.ongoing.map((move) => logisticsMoveCard(move, "ongoing")).join("")
+      : '<div class="empty-note">Approved moves waiting for receipt will appear here.</div>';
+    $("#logistics-completed-count").textContent = number(result.completed.length);
+    $("#logistics-completed").innerHTML = result.completed.length
+      ? result.completed.map((move) => logisticsMoveCard(move, "completed")).join("")
+      : '<div class="empty-note">Human-validated completed moves will appear here.</div>';
+  } catch (error) {
+    target.innerHTML = `<div class="empty-state"><h3>Logistics status is not available.</h3><p>${escapeHTML(error.message)}</p></div>`;
+  }
 }
 
 async function refreshMoves() {
@@ -457,6 +514,7 @@ async function loadDashboard() {
     state.moves = moves.items;
     state.insights = insights.items;
     state.stores = stores.items;
+    updateSummary();
     populateAnalyticsFilters(meta.categories);
     renderInsights();
     $("#overview-moves").innerHTML = state.moves.length
@@ -515,15 +573,66 @@ async function runAnalysis() {
 }
 
 async function updateDecision(id, decision) {
+  const move = state.moves.find((item) => item.id === id);
+  if (decision === "approved") {
+    if (!move) {
+      toast("Move details are no longer loaded. Refresh the list and review it again.", true);
+      return;
+    }
+    const confirmed = window.confirm([
+      "Validate this automated recommendation before approval:",
+      `SKU: ${move.sku_id} · ${moveTitle(move)}`,
+      `Route: ${move.from_location} → ${move.to_location}`,
+      `Quantity: ${number(move.qty)} units`,
+      `Expected arrival: ${move.arrival_date}`,
+      `Data reason: ${move.reason}`,
+      "",
+      "Have you checked these details against the displayed data?",
+    ].join("\n"));
+    if (!confirmed) return;
+  }
   try {
     await api(`/api/recommendations/${encodeURIComponent(id)}`, {
       method: "PATCH",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ status: decision }),
+      body: JSON.stringify({
+        status: decision,
+        ...(decision === "approved" ? { validated: true, validated_qty: move.qty } : {}),
+      }),
     });
     toast(decision === "approved" ? "Move approved and recorded." : "Move declined and recorded.");
     await loadDashboard();
     if (state.currentView === "moves") await refreshMoves();
+    if (state.currentView === "logistics") await refreshLogistics();
+  } catch (error) {
+    toast(error.message, true);
+  }
+}
+
+async function completeLogistics(form) {
+  const moveId = form.dataset.completeId;
+  const formData = new FormData(form);
+  const receivedQty = Number(formData.get("received_qty"));
+  const skuVerified = formData.has("sku_verified");
+  const routeVerified = formData.has("route_verified");
+  if (!skuVerified || !routeVerified) {
+    toast("Verify the SKU and route before completing logistics.", true);
+    return;
+  }
+  try {
+    await api(`/api/logistics/${encodeURIComponent(moveId)}/complete`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        received_qty: receivedQty,
+        sku_verified: skuVerified,
+        route_verified: routeVerified,
+        note: formData.get("note"),
+      }),
+    });
+    toast("Receipt validated and logistics marked complete.");
+    await refreshLogistics();
+    await loadDashboard();
   } catch (error) {
     toast(error.message, true);
   }
@@ -535,6 +644,7 @@ $("#welcome-upload").addEventListener("click", () => $("#file-input").click());
 $("#inline-upload").addEventListener("click", () => $("#file-input").click());
 $("#choose-file").addEventListener("click", () => $("#file-input").click());
 $("#run-button").addEventListener("click", runAnalysis);
+$("#refresh-logistics").addEventListener("click", refreshLogistics);
 ["move-type-filter", "move-decision-filter"].forEach((id) => $(`#${id}`).addEventListener("change", refreshMoves));
 $("#move-search").addEventListener("input", () => {
   clearTimeout(window.searchTimer);
@@ -589,6 +699,13 @@ document.addEventListener("click", (event) => {
   }
 });
 
+document.addEventListener("submit", (event) => {
+  const form = event.target.closest("[data-complete-id]");
+  if (!form) return;
+  event.preventDefault();
+  completeLogistics(form);
+});
+
 $("#chat-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   const question = $("#chat-question").value.trim();
@@ -601,7 +718,9 @@ $("#chat-form").addEventListener("submit", async (event) => {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ question }),
     });
-    answer.textContent = result.answer;
+    answer.textContent = result.provider === "local_computed"
+      ? `${result.answer}\n\n${result.fallback_reason ? "Gemini fallback · " + result.fallback_reason : "Local answer from backend-computed data."}`
+      : result.answer;
   } catch (error) {
     answer.textContent = error.message;
     toast(error.message, true);

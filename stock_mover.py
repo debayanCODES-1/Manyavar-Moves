@@ -149,6 +149,57 @@ def get_lead_days(rows: list[dict[str, Any]], source_type: str, target_type: str
     raise ValueError(f"No lead-time rule found for {source_type} -> {target_type}.")
 
 
+def build_lead_time_overrides(tables: dict[str, list[dict[str, Any]]]) -> dict[tuple[str, str], int]:
+    """Resolve lead times for routes from the single Kolkata warehouse and between stores."""
+    stores = {str(field(row, "store_id", default="")): row for row in tables["stores"]}
+    routes = [
+        (str(field(row, "route", "move_type", default="")).casefold(),
+         max(0, int(as_number(field(row, "days", "lead_time_days", "lead_days")))))
+        for row in tables["lead_times"]
+    ]
+
+    def warehouse_days(zone: str) -> int:
+        aliases = {
+            "north": ("north", "up"),
+            "east": ("east", "bihar"),
+            "south": ("south", "karnataka"),
+        }.get(zone.casefold(), (zone.casefold(),))
+        for route, days in routes:
+            if "warehouse wh-kol" in route and "to store" in route \
+                    and any(alias in route for alias in aliases):
+                return days
+        if not zone or not any(field(row, "route", "move_type", default="")
+                               for row in tables["lead_times"]):
+            return get_lead_days(tables["lead_times"], "warehouse", "store")
+        raise ValueError(f"No Kolkata warehouse lead-time route for zone {zone}.")
+
+    def store_days(source: dict[str, Any], target: dict[str, Any]) -> int:
+        same_city = str(field(source, "city", default="")).casefold() == str(
+            field(target, "city", default="")).casefold()
+        same_zone = str(field(source, "zone", default="")).casefold() == str(
+            field(target, "zone", default="")).casefold()
+        selector = "same city" if same_city else "same zone" if same_zone else "different zone"
+        for route, days in routes:
+            if "store to store" in route and selector in route:
+                if selector != "same zone" or "different city" in route:
+                    return days
+        if not any(field(row, "route", "move_type", default="")
+                   for row in tables["lead_times"]):
+            return get_lead_days(tables["lead_times"], "store", "store")
+        raise ValueError(f"No store-to-store lead-time route for {selector}.")
+
+    overrides = {}
+    for store_id, store in stores.items():
+        outbound_days = warehouse_days(str(field(store, "zone", default="")))
+        overrides[WAREHOUSE, store_id] = outbound_days
+        # Return transport follows the same Kolkata-to-store lane.
+        overrides[store_id, WAREHOUSE] = outbound_days
+        for target_id, target in stores.items():
+            if target_id != store_id:
+                overrides[store_id, target_id] = store_days(store, target)
+    return overrides
+
+
 def build_recommendations(tables: dict[str, list[dict[str, Any]]],
                           age_threshold: int = DEFAULT_AGE_DAYS,
                           velocity_override: dict[tuple[str, str], float] | None = None,
@@ -552,7 +603,10 @@ def main(argv: list[str] | None = None) -> int:
     try:
         tables = load_tables(args.input)
         moves = limit_manager_alerts(
-            build_recommendations(tables, age_threshold=args.age_days), tables)
+            build_recommendations(
+                tables, age_threshold=args.age_days,
+                lead_time_overrides=build_lead_time_overrides(tables),
+            ), tables)
         if args.output.suffix.lower() == ".json":
             args.output.write_text(json.dumps(moves, indent=2), encoding="utf-8")
         else:

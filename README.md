@@ -9,8 +9,9 @@ merchandising copilot.
 The UI pairs Manyavar's ivory and maroon identity with jade, indigo, and amber
 data accents, glass panels, editorial stock photography, and loading states.
 The images are illustrative stock photography, not product-specific catalogue
-images. No recommendation numbers are fabricated for the empty state: upload
-the shared workbook or CSV bundle to populate the dashboard.
+images. On a clean install the backend generates a clearly labeled synthetic
+demo dataset and calculates its forecasts and recommendations; upload the
+shared workbook or CSV bundle to replace it with provided data.
 
 ## Start locally
 
@@ -39,14 +40,19 @@ npm start
 
 Node reads the same local `.env` file automatically.
 
-Open [http://localhost:3000](http://localhost:3000) and choose a role. Upload
-the workbook on the **Data & rules** page or from the welcome banner. The API accepts an `.xlsx`
+Open [http://localhost:3000](http://localhost:3000) and choose a role. A
+synthetic 20-store / 385-SKU dataset is available immediately if no uploaded
+dataset exists; the same backend forecast, allocation, and validation pipeline
+calculates its visible dashboard results. The dashboard identifies this data
+as synthetic. Upload the workbook on the **Data & rules** page or from the
+welcome banner to replace it. The API accepts an `.xlsx`
 workbook or a `.zip` archive containing one `.csv` file per table. Required
 tables are `stores`, `area_managers`, `items`, `bills`, `bill_lines`,
 `stock_snapshot`, `stock_weekly`, `rules`, `min_display`, `lead_times`, and
-`flagship_protected`. `warehouse_inbound` and `calendar` are optional; calendar
-features improve the learned forecast. The upload is validated before its
-recommendations replace the current dataset.
+`flagship_protected`. `salespeople`, `roster_daily`, `footfall_daily`,
+`warehouse_inbound`, and `calendar` are optional; roster/footfall metrics
+enrich store analytics and calendar features improve the learned forecast.
+The upload is validated before its recommendations replace the current dataset.
 
 The FastAPI process stores the last uploaded source, approval decisions, and
 analysis state in `DATA_DIR` (default `./data`). It reloads the latest source
@@ -70,8 +76,10 @@ persists uploaded data and decisions.
 ## Product capabilities
 
 * **Warehouse → store:** prioritized shortages, available warehouse stock,
-  planned inbound supply, lead-time dates, store capacity, and dispatch
-  recommendations.
+  planned inbound supply, and dispatch recommendations from the single
+  `WH-KOL` warehouse in Kolkata. Warehouse-to-store lead times follow the
+  provided route table: 3 days to East, 4 to North, and 6 to South. Returns to
+  the warehouse use the same zone-specific lane.
 * **Store → store:** send stock from available donor surplus to uncovered
   demand; respect donor cover, category display minimums, S++ flagship style
   protections, capacity, and lead time.
@@ -81,9 +89,13 @@ persists uploaded data and decisions.
   `AGE_THRESHOLD_DAYS` or the standalone CLI `--age-days` option.
 * **Explainable review:** each move has urgency, from/to locations, SKU and
   style, quantity, dispatch/arrival dates, demand velocity, and a concise
-  reason. Merchandisers can approve or decline; the decision log survives
-  restart. Lists are downloadable as CSV or JSON. Approval records are not a
-  physical shipment; executing transfers requires an ERP/WMS integration.
+  reason. The Logistics dashboard surfaces the next automation-ranked move,
+  separates approved in-progress moves from completed receipts, and keeps a
+  completion audit. A person must validate the displayed recommendation before
+  approval, then verify the SKU, route, and exact received quantity before
+  marking logistics complete. These records survive restart. Completion is a
+  human-reported receipt, not a physical shipment signal from an ERP/WMS;
+  connecting an execution integration is still required for live tracking.
 * **Role-based demo access:** admin, stock manager, validator, area manager,
   analyst, and read-only viewer sessions have distinct permissions. Area
   managers select their AM account and are limited to that area for store
@@ -109,8 +121,9 @@ persists uploaded data and decisions.
 * **Manager attention:** respect each area manager's `max_alerts_per_week`.
 * **Optional Gemini Q&A:** ask questions about the computed recommendation set.
   Gemini receives aggregate stock and the move list, and is instructed not to
-  invent arithmetic or authorize changes. Recommendations still run without
-  an API key.
+  invent arithmetic or authorize changes. If Gemini is unconfigured or
+  unavailable, the backend answers from computed network, SKU, store, move,
+  and forecast data.
 * **Daily recompute:** `AUTO_RUN_INTERVAL_HOURS` defaults to 24 and recomputes
   recommendations from the persisted latest dataset. Set it to `0` to disable.
 
@@ -181,8 +194,12 @@ The gateway proxies FastAPI routes. Useful endpoints:
 * `POST /api/upload` (`multipart/form-data`, field `file`), `POST /api/run`
 * `GET /api/recommendations` with optional `move_type`, `decision`, `priority`,
   `search`, and `limit` filters
-* `PATCH /api/recommendations/{id}` with `{"status":"approved"}` or
-  `{"status":"rejected","note":"..."}`
+* `PATCH /api/recommendations/{id}` with
+  `{"status":"approved","validated":true,"validated_qty":12}` after reviewing
+  the recommendation, or `{"status":"rejected","note":"..."}`
+* `GET /api/logistics` for the next eligible recommendation, ongoing transfers,
+  and human-validated completed transfers
+* `POST /api/logistics/{id}/complete` to record a verified receipt
 * `GET /api/export?format=csv|json`, `POST /api/ask`
 
 In demo mode, the browser obtains an HttpOnly signed role session. Upload/run
@@ -198,8 +215,10 @@ node --check server.mjs
 node --check public/app.js
 ```
 
-Tests cover workbook upload, in-transit demand, protected styles, display
-minimums, donor cover, capacity, alert limits, and safe optimizer behavior.
+Tests cover automatic synthetic demo startup and model training, Gemini-free
+copilot answers, validated logistics completion, workbook upload, in-transit
+demand, protected styles, display minimums, donor cover, capacity, alert limits,
+Kolkata-to-zone warehouse routes, and safe optimizer behavior.
 
 ## Research references
 

@@ -7,6 +7,7 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 from openpyxl import Workbook
 
+from backend.app.demo_data import build_demo_tables
 import backend.main as api
 from test_stock_mover import fixture
 
@@ -71,6 +72,27 @@ class APIUploadTests(unittest.TestCase):
                             if row["bill_id"] == "B-PACK")
         self.assertEqual(package_bill["units"], 0)
 
+    def test_empty_data_directory_automatically_serves_calculated_demo_moves(self):
+        previous = dict(api.state)
+        with tempfile.TemporaryDirectory() as directory:
+            data_dir = Path(directory)
+            try:
+                with patch.object(api, "DATA_DIR", data_dir), \
+                        patch.object(api, "DECISIONS_PATH", data_dir / "decisions.json"), \
+                        TestClient(api.app) as client:
+                    summary = client.get("/api/summary").json()
+                    self.assertTrue(summary["has_data"])
+                    self.assertTrue(summary["is_demo_data"])
+                    self.assertEqual(summary["stores"], 20)
+                    self.assertEqual(summary["skus"], 385)
+                    self.assertEqual(summary["model"]["status"], "trained")
+                    moves = client.get("/api/recommendations?decision=pending").json()["items"]
+                    self.assertTrue(moves)
+                    self.assertEqual(moves[0]["from_location"], "WH-KOL")
+            finally:
+                api.state.clear()
+                api.state.update(previous)
+
     def test_workbook_upload_calculates_and_exposes_summary(self):
         source = api_fixture()
         content = workbook_bytes(source)
@@ -115,18 +137,95 @@ class APIUploadTests(unittest.TestCase):
                 self.assertEqual(bills["summary"]["bills"], 1)
                 pending = client.get("/api/recommendations?decision=pending").json()["items"]
                 self.assertTrue(pending)
+                with patch.dict("os.environ", {"GEMINI_API_KEY": "", "GOOGLE_API_KEY": ""}):
+                    local_answer = client.post(
+                        "/api/ask", json={"question": "What should move next?"},
+                    )
+                self.assertEqual(local_answer.status_code, 200, local_answer.text)
+                self.assertEqual(local_answer.json()["provider"], "local_computed")
+                self.assertIn(pending[0]["sku_id"], local_answer.json()["answer"])
+                with patch.dict("os.environ", {"GEMINI_API_KEY": "test-key"}), \
+                        patch("backend.main.urllib.request.urlopen",
+                              side_effect=api.urllib.error.URLError("offline")):
+                    fallback_answer = client.post(
+                        "/api/ask", json={"question": "What is in the warehouse?"},
+                    )
+                self.assertEqual(fallback_answer.status_code, 200, fallback_answer.text)
+                self.assertEqual(fallback_answer.json()["provider"], "local_computed")
+                self.assertIn("fallback_reason", fallback_answer.json())
+                logistics = client.get("/api/logistics").json()
+                candidate = logistics["next_move"]
+                self.assertEqual(candidate["id"], pending[0]["id"])
+                self.assertEqual(logistics["ongoing"], [])
                 decision = client.patch(
-                    f"/api/recommendations/{pending[0]['id']}",
+                    f"/api/recommendations/{candidate['id']}",
                     json={"status": "approved", "note": "Reviewed by merchandising"},
+                    headers={"x-stockmover-user": "Rule Validator",
+                             "x-stockmover-role": "validator"},
+                )
+                self.assertEqual(decision.status_code, 422)
+                decision = client.patch(
+                    f"/api/recommendations/{candidate['id']}",
+                    json={"status": "approved", "validated": True,
+                          "validated_qty": candidate["qty"],
+                          "note": "Reviewed by merchandising"},
                     headers={"x-stockmover-user": "Rule Validator",
                              "x-stockmover-role": "validator"},
                 )
                 self.assertEqual(decision.status_code, 200, decision.text)
                 self.assertEqual(decision.json()["item"]["decision"], "approved")
-                persisted = api.state["approvals"][pending[0]["id"]]
+                self.assertEqual(len(client.get("/api/logistics").json()["ongoing"]), 1)
+                wrong_receipt = client.post(
+                    f"/api/logistics/{candidate['id']}/complete",
+                    json={"received_qty": candidate["qty"] - 1,
+                          "sku_verified": True, "route_verified": True},
+                    headers={"x-stockmover-user": "Rule Validator",
+                             "x-stockmover-role": "validator"},
+                )
+                self.assertEqual(wrong_receipt.status_code, 422)
+                unchecked_receipt = client.post(
+                    f"/api/logistics/{candidate['id']}/complete",
+                    json={"received_qty": candidate["qty"],
+                          "sku_verified": True, "route_verified": False},
+                    headers={"x-stockmover-user": "Rule Validator",
+                             "x-stockmover-role": "validator"},
+                )
+                self.assertEqual(unchecked_receipt.status_code, 422)
+                completed = client.post(
+                    f"/api/logistics/{candidate['id']}/complete",
+                    json={"received_qty": candidate["qty"],
+                          "sku_verified": True, "route_verified": True,
+                          "note": "Receipt checked against the move"},
+                    headers={"x-stockmover-user": "Rule Validator",
+                             "x-stockmover-role": "validator"},
+                )
+                self.assertEqual(completed.status_code, 200, completed.text)
+                completed_list = client.get("/api/logistics").json()["completed"]
+                self.assertEqual(len(completed_list), 1)
+                self.assertEqual(completed_list[0]["completion"]["received_qty"], candidate["qty"])
+                self.assertEqual(completed_list[0]["completion"]["actor"], "Rule Validator")
+                current_moves = api.state["moves"]
+                api.state["moves"] = []
+                try:
+                    recovered = client.get("/api/logistics").json()["completed"]
+                    self.assertEqual(len(recovered), 1)
+                    self.assertEqual(recovered[0]["id"], candidate["id"])
+                finally:
+                    api.state["moves"] = current_moves
+                persisted = api.state["approvals"][candidate["id"]]
                 self.assertEqual(persisted["actor"], "Rule Validator")
+                self.assertIn("completed_at", persisted["completion"])
+                self.assertIn("move_snapshot", persisted)
         api.state.clear()
         api.state.update(previous)
+
+    def test_synthetic_demo_matches_network_and_catalogue_size(self):
+        tables = build_demo_tables()
+        self.assertEqual(len(tables["stores"]), 20)
+        self.assertEqual(len(tables["area_managers"]), 6)
+        self.assertEqual(len(tables["items"]), 385)
+        self.assertEqual(len(tables["salespeople"]), 100)
+        self.assertGreater(len(tables["stock_weekly"]), 10_000)
 
 
 if __name__ == "__main__":
