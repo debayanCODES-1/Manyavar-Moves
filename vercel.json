@@ -1,12 +1,8 @@
 {
   "version": 2,
-  "buildCommand": "npm run build",
+  "framework": "fastapi",
+  "buildCommand": "npm ci --include=dev && npm run build",
   "regions": ["sin1"],
-  "functions": {
-    "api/blob-upload.js": {
-      "maxDuration": 60
-    }
-  },
   "crons": [
     {
       "path": "/api/cron/run",

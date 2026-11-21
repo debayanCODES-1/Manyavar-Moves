@@ -75,8 +75,9 @@ Vercel Cron refreshes recommendations from that saved dataset; it does not
 fetch new ERP/WMS data.
 
 1. Link the Git repository to the Vercel project with the repository root as
-   the project root and retain the `npm run build` command from
-   [vercel.json](./vercel.json).
+   the project root. Retain the Vercel build command in
+   [vercel.json](./vercel.json); it installs the frontend bundler and builds
+   the browser assets.
 2. Provision Neon Postgres and a private Vercel Blob store, and connect both
    integrations to the project for Production, Preview, and Development.
    Confirm the integrations provide `DATABASE_URL` and `BLOB_READ_WRITE_TOKEN`.
@@ -204,7 +205,7 @@ The system keeps prediction, optimization, and rule enforcement distinct:
    sales. Category, style, SKU, tier, price, calendar seasonality, festival,
    wedding, recent SKU velocity, and recent pooled style velocity are model
    features. It reports a time-ordered two-week holdout MAE/WAPE. If there are
-   too few observations or the model dependency is missing, it visibly falls
+   too few observations or the model/native runtime is unavailable, it visibly falls
    back to sales divided by in-stock days; this is not represented as a trained
    model.
 2. **Allocation.** `stock_mover.py` builds feasible warehouse, lateral-transfer,

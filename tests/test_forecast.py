@@ -1,10 +1,35 @@
 import unittest
 from datetime import date, timedelta
+from unittest.mock import patch
 
 from backend.app.forecast import forecast_velocity
 
 
 class ForecastTests(unittest.TestCase):
+    def test_native_lightgbm_load_failure_uses_availability_corrected_fallback(self):
+        tables = {
+            "bills": [{"bill_id": "B1", "store_id": "S1", "bill_date": "2026-10-30"}],
+            "bill_lines": [{"bill_id": "B1", "sku_id": "KUR-01-M", "qty": 2}],
+            "stock_weekly": [{
+                "store_id": "S1", "sku_id": "KUR-01-M",
+                "week_ending": "2026-10-31", "days_in_stock": 7,
+            }],
+        }
+        original_import = __import__
+
+        def import_without_lightgbm(name, *args, **kwargs):
+            if name == "lightgbm":
+                raise OSError("native shared library unavailable")
+            return original_import(name, *args, **kwargs)
+
+        with patch("builtins.__import__", side_effect=import_without_lightgbm):
+            velocity, metadata = forecast_velocity(tables)
+
+        self.assertEqual(velocity[("S1", "KUR-01-M")], 2 / 7)
+        self.assertEqual(metadata["model"], "availability_corrected_baseline")
+        self.assertEqual(metadata["status"], "fallback")
+        self.assertIn("native runtime", metadata["reason"])
+
     def test_tweedie_forecast_trains_and_reports_temporal_holdout(self):
         stores = [{"store_id": f"S{i}", "tier": "A", "state": "Uttar Pradesh"}
                   for i in range(2)]

@@ -63,11 +63,16 @@ def forecast_velocity(tables: dict[str, list[dict[str, Any]]],
         import numpy as np
         import lightgbm as lgb
         import sklearn  # noqa: F401
-    except ImportError:
+    except (ImportError, OSError) as exc:
+        reason = (
+            "Install backend requirements to enable the LightGBM Tweedie model."
+            if isinstance(exc, ImportError)
+            else f"LightGBM's native runtime is unavailable: {exc}"
+        )
         return baseline, {
             "model": "availability_corrected_baseline",
             "status": "fallback",
-            "reason": "Install backend requirements to enable the LightGBM Tweedie model.",
+            "reason": reason,
             "training_rows": 0,
             "forecast_horizon_days": horizon_days,
         }
